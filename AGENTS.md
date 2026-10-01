@@ -1,0 +1,27 @@
+# claude-rozi-sessions agent guide
+
+## Mission
+
+Show every Claude Code background session as its own rozi Activity row, grouped by the worktree it
+works in. The repository is a rozi extension: a manifest and one supervised Python service.
+
+## Commands
+
+- Unit tests: `python -m unittest discover tests -p 'test_*.py'`
+- Manifest validation: `rozi extensions check .`
+- Whitespace check: `git diff --check`
+
+## Workflow rules
+
+- Use only public interfaces: `claude agents --json` and rozi's documented CLI (`list-panes`,
+  `publish`) and extension environment. Never read Claude's or rozi's private state files.
+- Keep the service standard-library Python 3 with no third-party dependencies.
+- An unrecognized Claude state must map to `working`, `idle`, `blocked`, or `done`; rozi reads any
+  other status word as a live run.
+- Keep `README.md` in sync with behavior, settings, and `min_rozi`.
+- Update this guide when durable repository conventions change.
+
+## Commits
+
+- Use Conventional Commits and include a DCO `Signed-off-by` trailer.
+- Do not commit local configuration, credentials, runtime data, or `__pycache__`.
