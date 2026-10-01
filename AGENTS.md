@@ -13,8 +13,12 @@ works in. The repository is a rozi extension: a manifest and one supervised Pyth
 
 ## Workflow rules
 
-- Use only public interfaces: `claude agents --json` and rozi's documented CLI (`list-panes`,
+- Use only public interfaces: `claude agents --json`, `claude stop`, Claude's `/resume` command,
+  and rozi's documented CLI (`list-panes`, `capture-pane`, `send-text`, `send-keys`, `notify`,
   `publish`) and extension environment. Never read Claude's or rozi's private state files.
+- Never type into Claude's prompt unless the screen shows an empty prompt, no dialog, no session
+  list, and no streaming turn. Read the typed command back before pressing Enter, and do anything
+  irreversible (`claude stop`) only after that read-back succeeds.
 - Keep the service standard-library Python 3 with no third-party dependencies.
 - An unrecognized Claude state must map to `working`, `idle`, `blocked`, or `done`; rozi reads any
   other status word as a live run.

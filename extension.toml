@@ -1,8 +1,8 @@
 [extension]
 id = "claude-rozi-sessions"
 title = "Claude Code sessions"
-description = "One Activity row per Claude Code background session, grouped by the worktree and branch it works in"
-version = "0.1.0"
+description = "One Activity row per Claude Code conversation, grouped by worktree; selecting a row switches Claude to it"
+version = "0.2.0"
 api = 1
 min_rozi = "0.0.28"
 homepage = "https://github.com/tui-lipan/claude-rozi-sessions"
@@ -16,6 +16,9 @@ poll_seconds = 2
 # "all" lists every background session. "cwd" lists only sessions started under the directory the
 # pane is in, for when several panes each run Claude's session view.
 scope = "all"
+# Selecting a row switches Claude to that session by typing `/resume` into its empty prompt.
+# false only lists sessions and never types into Claude.
+switching = true
 
 [[services]]
 name = "watch"
