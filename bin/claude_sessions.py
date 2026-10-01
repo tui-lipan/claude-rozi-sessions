@@ -30,8 +30,10 @@ from typing import Any, Callable
 ROZI = os.environ.get("ROZI_BIN", "rozi")
 EXTENSION_ID = "claude-rozi-sessions"
 COMMAND_TIMEOUT = 5.0
-# Seconds to let Claude act on `/resume` before reading the result back.
-SWITCH_SETTLE = 3.0
+# How long to wait for Claude to show the selected session after `/resume`: Claude resumes a
+# conversation in a second or two, and a stopped one can take longer to load.
+CONFIRM_ATTEMPTS = 20
+CONFIRM_INTERVAL = 0.5
 # How long to wait for the typed command to read back from Claude's prompt before giving up.
 VERIFY_ATTEMPTS = 10
 VERIFY_INTERVAL = 0.2
@@ -632,8 +634,11 @@ def switch(
     memory: HostMemory,
     sleep: Callable[[float], None] = time.sleep,
 ) -> bool:
-    """Put the host pane's client on `target_id`, or say why not. Never types into a prompt that
-    holds anything, and checks what it typed before pressing Enter."""
+    """Put the host pane's client on `target_id`, or say why not.
+
+    Never types into a prompt that holds anything. Reads the typed command back before anything
+    irreversible and again right before Enter, and reports success only once Claude shows the
+    target. Returns whether it did."""
     pane_id = host.pane.pane_id
     sessions = cli.sessions()
     screen = cli.screen(pane_id)
@@ -652,11 +657,11 @@ def switch(
     # Claude redraws its prompt, and opens its slash-command hints, a moment after the keys land.
     for attempt in range(VERIFY_ATTEMPTS):
         typed = cli.screen(pane_id)
-        if typed.composer is not None and typed.composer.text == command:
+        if prompt_holds(typed, command):
             break
         if attempt + 1 < VERIFY_ATTEMPTS:
             sleep(VERIFY_INTERVAL)
-    if typed.composer is None or typed.composer.text != command:
+    if not prompt_holds(typed, command):
         cli.notify(
             "Could not confirm the switch command in Claude's prompt, so it was not sent. "
             "Check the prompt before pressing Enter.",
@@ -665,17 +670,86 @@ def switch(
         return False
     if plan.stop_first:
         cli.stop(plan.target)
+        # Stopping takes a moment, and the prompt is the user's the whole time. Read it again
+        # right before Enter, so nothing typed meanwhile is submitted with the command.
+        if not prompt_holds(cli.screen(pane_id), command):
+            keep_stopped(memory, plan.target)
+            cli.notify(
+                "Claude's prompt changed while switching, so nothing was sent. "
+                f"“{label_of(plan.target)}” was stopped and can be selected again.",
+                error=True,
+            )
+            return False
     cli.press(pane_id, "Enter")
-    sleep(SWITCH_SETTLE)
-    failure = switch_failure(cli.screen_text(pane_id), command)
-    if failure is not None:
-        cli.notify(f"Claude did not switch: {failure}", error=True)
+    for attempt in range(CONFIRM_ATTEMPTS):
+        sleep(CONFIRM_INTERVAL)
+        shown = cli.screen_text(pane_id)
+        failure = switch_failure(shown, command)
+        if failure is not None:
+            if plan.stop_first:
+                keep_stopped(memory, plan.target)
+            cli.notify(f"Claude did not switch: {failure}", error=True)
+            return False
+        if switch_confirmed(plan, host, shown, cli.sessions()):
+            memory.last_target = plan.target.session_id
+            memory.displaced.pop(plan.target.session_id, None)
+            if plan.displaces is not None:
+                memory.displaced[plan.displaces.session_id] = plan.displaces
+            return True
+    # No answer either way. Claude may still switch, so nothing is recorded as on screen: the
+    # active row keeps following what Claude itself shows.
+    if plan.stop_first:
+        keep_stopped(memory, plan.target)
+    cli.notify(
+        f"Could not confirm that Claude switched to “{label_of(plan.target)}”. "
+        "Check the pane before selecting another row.",
+        error=True,
+    )
+    return False
+
+
+def prompt_holds(screen: Screen, command: str) -> bool:
+    return screen.composer is not None and screen.composer.text == command
+
+
+def label_of(session: Session) -> str:
+    return session.name or session.short_id
+
+
+def keep_stopped(memory: HostMemory, session: Session) -> None:
+    """Keep listing a session this service stopped, so stopping it never loses its row."""
+    memory.displaced[session.session_id] = session
+
+
+def switch_confirmed(plan: SwitchPlan, host: Host, shown: str, sessions: list[Session]) -> bool:
+    """Whether Claude now shows `plan.target`, from evidence rather than from silence.
+
+    The name Claude draws above its prompt confirms it when that name is the target's alone. An
+    unnamed or same-named target is confirmed by the process that runs it: resumed in place, it
+    runs in the worker that showed the conversation it replaced; resumed from the client's own
+    conversation, that conversation is no longer the client's.
+    """
+    target = plan.target
+    label = text_label(shown)
+    namesakes = [
+        session
+        for session in sessions
+        if target.name and session.name == target.name and session.session_id != target.session_id
+    ]
+    if label is not None and label in {target.short_id, target.session_id}:
+        return True
+    if target.name and not namesakes:
+        return label == target.name
+    running = next((s for s in sessions if s.session_id == target.session_id), None)
+    if running is None:
         return False
-    memory.last_target = plan.target.session_id
-    memory.displaced.pop(plan.target.session_id, None)
     if plan.displaces is not None:
-        memory.displaced[plan.displaces.session_id] = plan.displaces
-    return True
+        return running.pid is not None and running.pid == plan.displaces.pid
+    own = host.interactive
+    return own is not None and not any(
+        session.session_id == own.session_id and session.kind == "interactive"
+        for session in sessions
+    )
 
 
 def write_line(stream: Any, value: object) -> None:

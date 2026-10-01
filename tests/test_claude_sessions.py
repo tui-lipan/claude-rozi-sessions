@@ -272,14 +272,17 @@ class ScreenTests(unittest.TestCase):
 class FakeCli:
     """Records every command the switch runs, against scripted screens and sessions."""
 
-    def __init__(self, listed, screens, after=""):
+    def __init__(self, listed, screens, after="", listed_after=None):
         self.listed = listed
         self.screens = list(screens)
-        self.after = after
+        # What Claude shows, and lists, once Enter has been pressed.
+        self.after = after if isinstance(after, list) else [after]
+        self.listed_after = listed_after
         self.calls: list[tuple] = []
 
     def sessions(self):
-        return self.listed
+        entered = ("press", "Enter") in self.calls
+        return self.listed_after if entered and self.listed_after is not None else self.listed
 
     def screen(self, pane_id):
         # The last scripted screen stays up, as a real one does until something changes it.
@@ -288,7 +291,7 @@ class FakeCli:
         return cs.read_screen(frame_rows)
 
     def screen_text(self, pane_id):
-        return self.after
+        return self.after.pop(0) if len(self.after) > 1 else self.after[0]
 
     def type_text(self, pane_id, value):
         self.calls.append(("type", value))
@@ -307,6 +310,11 @@ def actions(cli: FakeCli) -> list[tuple]:
     return [call for call in cli.calls if call[0] != "screen"]
 
 
+def showing(label: str) -> str:
+    """A plain-text capture of Claude attached to the session named `label`."""
+    return f"● reply\n{RULE} {label} ─\n❯\n{RULE}\n  footer"
+
+
 class SwitchTests(unittest.TestCase):
     def setUp(self) -> None:
         self.memory = cs.HostMemory()
@@ -317,7 +325,13 @@ class SwitchTests(unittest.TestCase):
     def test_a_client_with_its_own_conversation_resumes_without_stopping_anything(self) -> None:
         listed = sessions(session("own", kind="interactive", pid=500), session("target-id", pid=9))
         host = cs.Host(pane=pane(), interactive=listed[0])
-        cli = FakeCli(listed, [prompt(), prompt(typed="/resume target-id")])
+        # The target is unnamed, so the evidence is the client's own conversation leaving it.
+        cli = FakeCli(
+            listed,
+            [prompt(), prompt(typed="/resume target-id")],
+            after="● reply\n❯",
+            listed_after=sessions(session("forked", pid=8), session("target-id", pid=9)),
+        )
         self.assertTrue(self.run_switch(cli, host, "target-id"))
         self.assertEqual(
             actions(cli), [("type", "/resume target-id"), ("press", "Enter")]
@@ -331,6 +345,7 @@ class SwitchTests(unittest.TestCase):
         cli = FakeCli(
             listed,
             [prompt(label="shown"), prompt(typed="/resume target-id", label="shown")],
+            after=[showing("shown"), showing("target")],
         )
         self.assertTrue(self.run_switch(cli, host, "target-id"))
         # The command is verified on screen before anything irreversible: stop, then Enter.
@@ -348,6 +363,7 @@ class SwitchTests(unittest.TestCase):
         cli = FakeCli(
             listed,
             [prompt(label="target"), prompt(typed="/resume shown-id", label="target")],
+            after=showing("shown"),
         )
         self.assertTrue(self.run_switch(cli, host, "shown-id"))
         self.assertEqual(actions(cli), [("type", "/resume shown-id"), ("press", "Enter")])
@@ -375,6 +391,8 @@ class SwitchTests(unittest.TestCase):
         cli = FakeCli(
             listed,
             [prompt(), prompt(typed="/res"), prompt(typed="/resume target-id")],
+            after="● reply\n❯",
+            listed_after=sessions(session("target-id")),
         )
         self.assertTrue(self.run_switch(cli, host, "target-id"))
         self.assertEqual(actions(cli)[-1], ("press", "Enter"))
@@ -421,6 +439,66 @@ class SwitchTests(unittest.TestCase):
         self.assertFalse(self.run_switch(cli, host, "target-id"))
         self.assertIn("was not found", actions(cli)[-1][1])
         self.assertIsNone(self.memory.last_target)
+
+    def test_text_typed_while_the_target_stops_is_not_submitted(self) -> None:
+        listed = sessions(session("shown-id", name="shown"), session("target-id", name="target"))
+        host = cs.Host(pane=pane(), interactive=None)
+        cli = FakeCli(
+            listed,
+            [
+                prompt(label="shown"),
+                prompt(typed="/resume target-id", label="shown"),
+                # Read again after `claude stop`: someone added to the prompt meanwhile.
+                prompt(typed="/resume target-id please", label="shown"),
+            ],
+        )
+        self.assertFalse(self.run_switch(cli, host, "target-id"))
+        self.assertEqual(
+            [call[0] for call in actions(cli)], ["type", "stop", "notify"]
+        )
+        self.assertIn("nothing was sent", actions(cli)[-1][1])
+        # The target was stopped, so it stays listed to be selected again; nothing else moved.
+        self.assertEqual(list(self.memory.displaced), ["target-id"])
+        self.assertIsNone(self.memory.last_target)
+
+    def test_silence_after_enter_is_not_success(self) -> None:
+        listed = sessions(session("shown-id", name="shown"), session("target-id", name="target"))
+        host = cs.Host(pane=pane(), interactive=None)
+        # No refusal, but Claude keeps showing the original session.
+        cli = FakeCli(
+            listed,
+            [prompt(label="shown"), prompt(typed="/resume target-id", label="shown")],
+            after=showing("shown"),
+        )
+        self.assertFalse(self.run_switch(cli, host, "target-id"))
+        self.assertIn(("press", "Enter"), actions(cli))
+        self.assertIn("Could not confirm", actions(cli)[-1][1])
+        self.assertIsNone(self.memory.last_target)
+        self.assertEqual(list(self.memory.displaced), ["target-id"])
+        # The row on screen still follows Claude, not the attempted switch.
+        rows = cs.host_rows(host, listed, "all", self.memory, "shown")
+        self.assertEqual(
+            [(row["id"], row["active"]) for row in rows if row["active"]], [("shown-id", True)]
+        )
+
+    def test_a_shared_name_needs_the_process_to_confirm(self) -> None:
+        listed = sessions(
+            session("shown-id", name="shown", pid=40),
+            session("target-id", name="twin", pid=50),
+            session("other-id", name="twin", pid=60),
+        )
+        host = cs.Host(pane=pane(), interactive=None)
+        screens = [prompt(label="shown"), prompt(typed="/resume target-id", label="shown")]
+        # Resumed in place: the target now runs in the worker that showed "shown".
+        moved = sessions(session("target-id", name="twin", pid=40), session("other-id", name="twin", pid=60))
+        cli = FakeCli(listed, screens, after=showing("twin"), listed_after=moved)
+        self.assertTrue(self.run_switch(cli, host, "target-id"))
+
+        # The same name on screen with the target running elsewhere proves nothing.
+        self.memory = cs.HostMemory()
+        stuck = sessions(session("shown-id", name="shown", pid=40), session("other-id", name="twin", pid=60))
+        cli = FakeCli(listed, screens, after=showing("twin"), listed_after=stuck)
+        self.assertFalse(self.run_switch(cli, host, "target-id"))
 
     def test_selecting_the_row_on_screen_does_nothing(self) -> None:
         listed = sessions(session("own", kind="interactive", pid=500), session("bg"))

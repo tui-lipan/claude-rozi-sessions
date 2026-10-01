@@ -103,7 +103,14 @@ The extension does not switch, and says why in a rozi notification, when:
 - The selected session has ended.
 
 If the command does not read back exactly, for example because someone typed at the same moment,
-it is left in the prompt unsent. If Claude refuses it, the notification quotes Claude's answer.
+it is left in the prompt unsent. When the selected session has to be stopped first, the prompt is
+read again after stopping it, right before Enter; if it changed, nothing is sent and the stopped
+session stays listed to be selected again.
+
+A switch counts only once Claude shows the selected session: its name above the prompt, when no
+other session shares that name, or otherwise the process that now runs it. If Claude refuses, the
+notification quotes Claude's answer. If neither happens within ten seconds, a notification says so,
+and the active row keeps following what Claude itself shows.
 
 To list sessions without ever typing into Claude, set `switching = false`.
 
