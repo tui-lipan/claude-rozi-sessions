@@ -722,34 +722,33 @@ def keep_stopped(memory: HostMemory, session: Session) -> None:
 
 
 def switch_confirmed(plan: SwitchPlan, host: Host, shown: str, sessions: list[Session]) -> bool:
-    """Whether Claude now shows `plan.target`, from evidence rather than from silence.
+    """Whether Claude now shows `plan.target`, from evidence that names the target.
 
-    The name Claude draws above its prompt confirms it when that name is the target's alone. An
-    unnamed or same-named target is confirmed by the process that runs it: resumed in place, it
-    runs in the worker that showed the conversation it replaced; resumed from the client's own
-    conversation, that conversation is no longer the client's.
+    Claude draws the session it shows above its prompt. That label confirms the switch when it
+    names the target and nothing else, and refutes it when it names only another conversation.
+    When it is missing or names several, only the process can tell: a session resumed in place
+    runs in the worker that showed the conversation it replaced. The client's own conversation
+    leaving the client is not evidence, because it leaves whichever session opens.
     """
     target = plan.target
     label = text_label(shown)
-    namesakes = [
-        session
-        for session in sessions
-        if target.name and session.name == target.name and session.session_id != target.session_id
-    ]
-    if label is not None and label in {target.short_id, target.session_id}:
+    names_target = label is not None and label in session_names(target)
+    others = [session for session in sessions if session.session_id != target.session_id]
+    others += [session for session in (host.interactive, plan.displaces) if session is not None]
+    names_other = label is not None and any(label in session_names(other) for other in others)
+    if names_target and not names_other:
         return True
-    if target.name and not namesakes:
-        return label == target.name
-    running = next((s for s in sessions if s.session_id == target.session_id), None)
-    if running is None:
+    if names_other and not names_target:
         return False
-    if plan.displaces is not None:
-        return running.pid is not None and running.pid == plan.displaces.pid
-    own = host.interactive
-    return own is not None and not any(
-        session.session_id == own.session_id and session.kind == "interactive"
-        for session in sessions
-    )
+    if plan.displaces is None:
+        return False
+    running = next((s for s in sessions if s.session_id == target.session_id), None)
+    return running is not None and running.pid is not None and running.pid == plan.displaces.pid
+
+
+def session_names(session: Session) -> set[str]:
+    """Every way Claude may name `session` above its prompt."""
+    return {name for name in (session.name, session.short_id, session.session_id) if name}
 
 
 def write_line(stream: Any, value: object) -> None:

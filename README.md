@@ -107,10 +107,12 @@ it is left in the prompt unsent. When the selected session has to be stopped fir
 read again after stopping it, right before Enter; if it changed, nothing is sent and the stopped
 session stays listed to be selected again.
 
-A switch counts only once Claude shows the selected session: its name above the prompt, when no
-other session shares that name, or otherwise the process that now runs it. If Claude refuses, the
-notification quotes Claude's answer. If neither happens within ten seconds, a notification says so,
-and the active row keeps following what Claude itself shows.
+A switch counts only once Claude names the selected session above its prompt: its name, or its
+short ID when it has none. A label that names another session means the switch did not happen.
+When the name is shared, an attached client's switch is confirmed instead by the session now
+running in the worker that showed the conversation it replaced. If Claude refuses, the notification
+quotes Claude's answer. If there is no confirmation within ten seconds, a notification says so, and
+the active row keeps following what Claude itself shows.
 
 To list sessions without ever typing into Claude, set `switching = false`.
 

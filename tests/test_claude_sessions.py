@@ -325,11 +325,11 @@ class SwitchTests(unittest.TestCase):
     def test_a_client_with_its_own_conversation_resumes_without_stopping_anything(self) -> None:
         listed = sessions(session("own", kind="interactive", pid=500), session("target-id", pid=9))
         host = cs.Host(pane=pane(), interactive=listed[0])
-        # The target is unnamed, so the evidence is the client's own conversation leaving it.
+        # An unnamed session is labelled with its short id, as Claude draws it.
         cli = FakeCli(
             listed,
             [prompt(), prompt(typed="/resume target-id")],
-            after="● reply\n❯",
+            after=["● reply\n❯", showing("target-i")],
             listed_after=sessions(session("forked", pid=8), session("target-id", pid=9)),
         )
         self.assertTrue(self.run_switch(cli, host, "target-id"))
@@ -391,7 +391,7 @@ class SwitchTests(unittest.TestCase):
         cli = FakeCli(
             listed,
             [prompt(), prompt(typed="/res"), prompt(typed="/resume target-id")],
-            after="● reply\n❯",
+            after=showing("target-i"),
             listed_after=sessions(session("target-id")),
         )
         self.assertTrue(self.run_switch(cli, host, "target-id"))
@@ -499,6 +499,37 @@ class SwitchTests(unittest.TestCase):
         stuck = sessions(session("shown-id", name="shown", pid=40), session("other-id", name="twin", pid=60))
         cli = FakeCli(listed, screens, after=showing("twin"), listed_after=stuck)
         self.assertFalse(self.run_switch(cli, host, "target-id"))
+
+    def test_the_own_conversation_leaving_does_not_confirm_an_unnamed_target(self) -> None:
+        listed = sessions(
+            session("own", kind="interactive", pid=500),
+            session("target-id", pid=9),
+            session("other-id", pid=7),
+        )
+        host = cs.Host(pane=pane(), interactive=listed[0])
+        screens = [prompt(), prompt(typed="/resume target-id")]
+        # The client's own conversation left, the target's process is unchanged, and Claude
+        # shows another session: that is not the target opening.
+        moved_on = sessions(session("forked", pid=8), session("target-id", pid=9), session("other-id", pid=7))
+        cli = FakeCli(listed, screens, after=showing("other-id"), listed_after=moved_on)
+        self.assertFalse(self.run_switch(cli, host, "target-id"))
+        self.assertIsNone(self.memory.last_target)
+        self.assertIn("Could not confirm", actions(cli)[-1][1])
+
+        # No label at all is no evidence either.
+        cli = FakeCli(listed, screens, after="● reply\n❯", listed_after=moved_on)
+        self.assertFalse(self.run_switch(cli, host, "target-id"))
+        self.assertIsNone(self.memory.last_target)
+
+    def test_a_label_naming_another_session_refutes_process_evidence(self) -> None:
+        listed = sessions(session("shown-id", name="shown", pid=40), session("target-id", pid=50))
+        host = cs.Host(pane=pane(), interactive=None)
+        screens = [prompt(label="shown"), prompt(typed="/resume target-id", label="shown")]
+        # The target now runs in the replaced worker, but Claude still names "shown".
+        moved = sessions(session("target-id", pid=40))
+        cli = FakeCli(listed, screens, after=showing("shown"), listed_after=moved)
+        self.assertFalse(self.run_switch(cli, host, "target-id"))
+        self.assertIsNone(self.memory.last_target)
 
     def test_selecting_the_row_on_screen_does_nothing(self) -> None:
         listed = sessions(session("own", kind="interactive", pid=500), session("bg"))
