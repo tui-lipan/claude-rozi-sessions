@@ -55,18 +55,21 @@ Every background session is listed after that, oldest first, each with the direc
 so rozi groups it by that directory's project and branch. Interactive sessions in other terminals
 are listed where they run, not here.
 
-| Claude Code state | Row status |
+| Claude Code reports | Row status |
 | --- | --- |
+| `status` `waiting`: a permission prompt, question, or other dialog is open | `blocked`, with Claude's reason, such as "Permission prompt" |
 | `working` | `working` |
-| `needs_input`, `blocked`, and similar | `blocked` |
+| `blocked` with no dialog open | `done`, reason "Awaiting your reply" |
 | `done` | `done` |
 | `idle` | `idle` |
 | `stopped` | `idle`, reason "Stopped" |
 | `failed` | `idle`, reason "Session failed" |
 | Anything else | `working` while Claude reports it busy, otherwise `idle` |
 
-Claude reports `blocked` both for a permission question and for a session waiting for its next
-prompt, so a `blocked` row means "waiting on you" either way.
+Claude also reports `blocked` once a turn has finished, when its reply ends with a question or
+asks you to choose, and for a session waiting for its first prompt. No dialog is open then, so the
+row shows the turn as `done` and keeps `blocked` for a session that cannot continue until you
+answer it.
 
 ### With rozi's Claude Code plugin
 

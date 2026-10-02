@@ -83,14 +83,28 @@ def prompt(typed: str = "", placeholder: str = 'Try "how does <filepath> work?"'
 
 class SessionTests(unittest.TestCase):
     def test_states_map_onto_rozis_vocabulary(self) -> None:
-        def state(value: str, status: str = "idle") -> tuple[str, str | None]:
+        def state(value: str, status: str = "idle", **extra: str) -> tuple[str, str | None]:
             return cs.Session.from_wire(
-                {"sessionId": "s", "state": value, "status": status}
+                {"sessionId": "s", "state": value, "status": status, **extra}
             ).row_state()
 
         self.assertEqual(state("working"), ("working", None))
         self.assertEqual(state("done"), ("done", None))
-        self.assertEqual(state("needs_input"), ("blocked", None))
+        self.assertEqual(
+            state("blocked", "waiting", waitingFor="permission prompt"),
+            ("blocked", "Permission prompt"),
+        )
+        self.assertEqual(state("blocked", "waiting"), ("blocked", None))
+        self.assertEqual(
+            cs.Session.from_wire({"sessionId": "s", "status": "waiting"}).row_state(),
+            ("blocked", None),
+        )
+        # A finished turn whose reply ends in a question shows no dialog: the turn is over.
+        self.assertEqual(state("blocked"), ("done", "Awaiting your reply"))
+        self.assertEqual(
+            cs.Session.from_wire({"sessionId": "s", "state": "blocked"}).row_state(),
+            ("done", "Awaiting your reply"),
+        )
         self.assertEqual(state("stopped"), ("idle", "Stopped"))
         self.assertEqual(state("failed"), ("idle", "Session failed"))
         # An unknown word must not reach rozi, which would read it as a live run.

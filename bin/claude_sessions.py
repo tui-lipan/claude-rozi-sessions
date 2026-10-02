@@ -37,17 +37,8 @@ CONFIRM_INTERVAL = 0.5
 # How long to wait for the typed command to read back from Claude's prompt before giving up.
 VERIFY_ATTEMPTS = 10
 VERIFY_INTERVAL = 0.2
-# Claude's own names for a session waiting on the user. Anything unrecognized falls back on its
-# coarse busy/idle `status`, never on a custom word, which rozi would read as a live run.
-BLOCKED_STATES = {
-    "blocked",
-    "waiting",
-    "needs_input",
-    "needs-input",
-    "awaiting_input",
-    "input_required",
-    "permission",
-}
+# Anything unrecognized falls back on its coarse busy/idle `status`, never on a custom word, which
+# rozi would read as a live run.
 FAILED_STATES = {"failed", "error", "errored", "crashed"}
 # Shown by Claude in place of a conversation's prompt: its list of every session, whose prompt
 # starts a *new* session. Typing a command there would create one.
@@ -114,6 +105,7 @@ class Session:
     name: str | None
     state: str
     status: str
+    waiting_for: str | None
     started_at: int
 
     @classmethod
@@ -132,13 +124,18 @@ class Session:
             name=text(value.get("name")),
             state=(text(value.get("state")) or "").casefold(),
             status=(text(value.get("status")) or "").casefold(),
+            waiting_for=text(value.get("waitingFor")),
             started_at=integer(value.get("startedAt")) or 0,
         )
 
     def row_state(self) -> tuple[str, str | None]:
         """The rozi status this session shows, and why when the word alone does not say."""
-        if self.state in BLOCKED_STATES:
-            return "blocked", None
+        # Only a live process showing a dialog reports `waiting`. Claude also says `blocked` when a
+        # finished turn's reply reads as a question; that turn is over, and nothing is stuck.
+        if self.status == "waiting":
+            return "blocked", (self.waiting_for or "").capitalize() or None
+        if self.state == "blocked":
+            return "done", "Awaiting your reply"
         if self.state in FAILED_STATES:
             return "idle", "Session failed"
         if self.state == "stopped":
