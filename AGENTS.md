@@ -23,6 +23,9 @@ works in. The repository is a rozi extension: a manifest and one supervised Pyth
 - An unrecognized Claude state must map to `working`, `idle`, `blocked`, or `done`; rozi reads any
   other status word as a live run.
 - Keep `README.md` in sync with behavior, settings, and `min_rozi`.
+- Bump `version` in `extension.toml` with every change users install: patch for a fix, minor for a
+  feature or setting. rozi offers an update whenever the remote moves, and labels one without a new
+  version only by its commit hash.
 - Update this guide when durable repository conventions change.
 
 ## Commits
