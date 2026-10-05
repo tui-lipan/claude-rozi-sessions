@@ -170,16 +170,17 @@ class RowTests(unittest.TestCase):
         (host,) = cs.classify([pane()], listed, group_of=lambda pid: pid)
         self.assertEqual(cs.host_rows(host, listed, "all", cs.HostMemory(), None), [])
 
-    def test_the_clients_own_conversation_leads_and_is_the_active_row(self) -> None:
+    def test_rows_run_oldest_first_with_the_clients_own_conversation_active(self) -> None:
         listed = sessions(
-            session("late", started=2),
-            session("own", kind="interactive", pid=500),
+            session("late", started=3),
+            session("own", kind="interactive", pid=500, started=2),
             session("early", started=1),
         )
         (host,) = cs.classify([pane()], listed, group_of=lambda pid: pid)
         rows = cs.host_rows(host, listed, "all", cs.HostMemory(), None)
-        self.assertEqual([row["id"] for row in rows], ["own", "early", "late"])
-        self.assertEqual([row["active"] for row in rows], [True, False, False])
+        # rozi names a pane's rows by position, so the own conversation takes its place in time.
+        self.assertEqual([row["id"] for row in rows], ["early", "own", "late"])
+        self.assertEqual([row["active"] for row in rows], [False, True, False])
 
     def test_an_attached_client_is_on_the_session_named_above_its_prompt(self) -> None:
         listed = sessions(session("aaa", name="fix login"), session("bbb", name="docs"))
@@ -203,12 +204,28 @@ class RowTests(unittest.TestCase):
         host = cs.Host(pane=pane(), interactive=None)
         memory = cs.HostMemory(displaced={"old": old})
         rows = cs.host_rows(host, sessions(session("now", name="now")), "all", memory, "now")
+        # A finished run stays finished, so rozi keeps its result and run time.
         self.assertEqual(
             [(row["id"], row["status"], row.get("reason")) for row in rows],
-            [("now", "done", None), ("old", "idle", "Stopped")],
+            [("now", "done", None), ("old", "done", "Stopped")],
         )
         cs.host_rows(host, sessions(session("old"), session("now")), "all", memory, None)
         self.assertEqual(memory.displaced, {})
+
+    def test_a_displaced_conversation_without_a_finished_run_is_idle(self) -> None:
+        (old,) = sessions(session("old", state="idle"))
+        host = cs.Host(pane=pane(), interactive=None)
+        memory = cs.HostMemory(displaced={"old": old})
+        rows = cs.host_rows(host, sessions(session("now")), "all", memory, None)
+        (stopped,) = [row for row in rows if row["id"] == "old"]
+        self.assertEqual((stopped["status"], stopped["reason"]), ("idle", "Stopped"))
+
+    def test_a_displaced_conversation_keeps_its_place(self) -> None:
+        (old,) = sessions(session("old", started=1))
+        host = cs.Host(pane=pane(), interactive=None)
+        memory = cs.HostMemory(displaced={"old": old})
+        rows = cs.host_rows(host, sessions(session("now", started=2)), "all", memory, None)
+        self.assertEqual([row["id"] for row in rows], ["old", "now"])
 
     def test_cwd_scope_keeps_sessions_started_under_the_pane(self) -> None:
         listed = sessions(
@@ -454,6 +471,18 @@ class SwitchTests(unittest.TestCase):
         self.assertIn("was not found", actions(cli)[-1][1])
         self.assertIsNone(self.memory.last_target)
 
+    def test_a_conversation_claude_cannot_find_is_not_kept_listed(self) -> None:
+        listed = sessions(session("shown-id", name="shown"), session("empty-id"))
+        host = cs.Host(pane=pane(), interactive=None)
+        cli = FakeCli(
+            listed,
+            [prompt(label="shown"), prompt(typed="/resume empty-id", label="shown")],
+            after="❯ /resume empty-id\n  ⎿  Session empty-id was not found.",
+        )
+        self.assertFalse(self.run_switch(cli, host, "empty-id"))
+        self.assertIn(("stop", "empty-id"), actions(cli))
+        self.assertEqual(self.memory.displaced, {})
+
     def test_text_typed_while_the_target_stops_is_not_submitted(self) -> None:
         listed = sessions(session("shown-id", name="shown"), session("target-id", name="target"))
         host = cs.Host(pane=pane(), interactive=None)
@@ -530,10 +559,25 @@ class SwitchTests(unittest.TestCase):
         self.assertIsNone(self.memory.last_target)
         self.assertIn("Could not confirm", actions(cli)[-1][1])
 
-        # No label at all is no evidence either.
+    def test_the_own_conversation_leaving_without_a_label_confirms_the_switch(self) -> None:
+        listed = sessions(session("own", kind="interactive", pid=500), session("target-id", pid=9))
+        host = cs.Host(pane=pane(), interactive=listed[0])
+        screens = [prompt(), prompt(typed="/resume target-id")]
+        # Claude draws no label after `/resume` from its own conversation, which it moves to the
+        # background under a new id.
+        moved_on = sessions(session("forked", pid=8), session("target-id", pid=9))
         cli = FakeCli(listed, screens, after="● reply\n❯", listed_after=moved_on)
+        self.assertTrue(self.run_switch(cli, host, "target-id"))
+        self.assertEqual(self.memory.last_target, "target-id")
+
+    def test_no_label_while_the_own_conversation_stays_confirms_nothing(self) -> None:
+        listed = sessions(session("own", kind="interactive", pid=500), session("target-id", pid=9))
+        host = cs.Host(pane=pane(), interactive=listed[0])
+        screens = [prompt(), prompt(typed="/resume target-id")]
+        cli = FakeCli(listed, screens, after="● reply\n❯")
         self.assertFalse(self.run_switch(cli, host, "target-id"))
         self.assertIsNone(self.memory.last_target)
+        self.assertIn("Could not confirm", actions(cli)[-1][1])
 
     def test_a_label_naming_another_session_refutes_process_evidence(self) -> None:
         listed = sessions(session("shown-id", name="shown", pid=40), session("target-id", pid=50))
@@ -551,6 +595,116 @@ class SwitchTests(unittest.TestCase):
         cli = FakeCli(listed, [prompt(typed="a draft is fine here")])
         self.assertTrue(self.run_switch(cli, host, "own"))
         self.assertEqual(actions(cli), [])
+
+
+class MovedConversationTests(unittest.TestCase):
+    """`/resume` from a client's own conversation lists that conversation again under a new id."""
+
+    def setUp(self) -> None:
+        self.memory = cs.HostMemory()
+        self.before = sessions(
+            session("early", started=1, name="early"),
+            session("own", kind="interactive", pid=500, started=2),
+        )
+        (self.host,) = cs.classify([pane()], self.before, group_of=lambda pid: pid)
+        cs.follow_moved(self.memory, self.host, self.before, now_ms=10)
+        self.after = sessions(
+            session("early", started=1, name="early"),
+            session("forked", started=5, state="blocked"),
+        )
+        self.attached = cs.Host(pane=pane(), interactive=None)
+
+    def rows(self, listed, label=None):
+        cs.follow_moved(self.memory, self.attached, listed, now_ms=20)
+        return cs.host_rows(self.attached, listed, "all", self.memory, label)
+
+    def test_the_moved_conversation_keeps_its_row_id_and_place(self) -> None:
+        rows = self.rows(self.after, label="early")
+        self.assertEqual([row["id"] for row in rows], ["early", "own"])
+        # Claude keeps the transcript, and resumes it, under the first id.
+        self.assertEqual([row["native_session"] for row in rows], ["early", "own"])
+        self.assertEqual([row["active"] for row in rows], [True, False])
+
+    def test_selecting_the_moved_row_resumes_the_conversation_under_its_new_id(self) -> None:
+        self.rows(self.after, label="early")
+        self.assertEqual(self.memory.session_for_row("own"), "forked")
+        cli = FakeCli(
+            self.after,
+            [prompt(label="early"), prompt(typed="/resume own", label="early")],
+            after=[showing("early"), showing("forked")],
+        )
+        self.assertTrue(
+            cs.switch(cli, self.attached, "own", self.memory, sleep=lambda _: None)
+        )
+        # The background job is stopped by its own id, and the conversation resumed by its first.
+        self.assertEqual(
+            actions(cli), [("type", "/resume own"), ("stop", "forked"), ("press", "Enter")]
+        )
+        # On screen now, it is still published under its first row id and in its first place.
+        shown = sessions(session("forked", started=5))
+        rows = cs.host_rows(self.attached, shown, "all", self.memory, None)
+        self.assertEqual(
+            [(row["id"], row["active"]) for row in rows], [("early", False), ("own", True)]
+        )
+
+    def test_switching_back_is_confirmed_by_the_conversations_own_name(self) -> None:
+        # Claude lists the moved job under a name of its own. Resumed in place, the worker that
+        # showed "early" lists the conversation by its first id and name again.
+        before = sessions(
+            session("early", started=1, name="early", pid=40),
+            session("own", kind="interactive", pid=500, started=2, name="mine"),
+        )
+        (host,) = cs.classify([pane()], before, group_of=lambda pid: pid)
+        memory = cs.HostMemory()
+        cs.follow_moved(memory, host, before, now_ms=10)
+        moved = sessions(
+            session("early", started=1, name="early", pid=40),
+            session("job", started=5, name="mine (2)", pid=41),
+        )
+        cs.follow_moved(memory, self.attached, moved, now_ms=20)
+        cs.host_rows(self.attached, moved, "all", memory, "early")
+        resumed = sessions(session("own", started=0, name="mine", pid=40))
+        cli = FakeCli(
+            moved,
+            [prompt(label="early"), prompt(typed="/resume own", label="early")],
+            after=showing("mine"),
+            listed_after=resumed,
+        )
+        self.assertTrue(cs.switch(cli, self.attached, "own", memory, sleep=lambda _: None))
+        self.assertEqual(list(memory.displaced), ["early"])
+        cs.follow_moved(memory, self.attached, resumed, now_ms=30)
+        rows = cs.host_rows(self.attached, resumed, "all", memory, "mine")
+        # Resumed in the worker of "early", the conversation reports that worker's start, but both
+        # rows keep the places they were first published in.
+        self.assertEqual(
+            [(row["id"], row["status"], row["active"]) for row in rows],
+            [("early", "done", False), ("own", "done", True)],
+        )
+
+    def test_a_stopped_job_is_not_listed_beside_its_resumed_conversation(self) -> None:
+        self.rows(self.after)
+        (job,) = [s for s in self.after if s.session_id == "forked"]
+        # A switch back that was not confirmed keeps the stopped job, while Claude already runs
+        # the conversation again under its first id.
+        self.memory.displaced["forked"] = job
+        rows = self.rows(sessions(session("early", started=1), session("own", started=0)))
+        self.assertEqual(sorted(row["id"] for row in rows), ["early", "own"])
+
+    def test_two_new_sessions_in_the_directory_are_not_guessed_between(self) -> None:
+        crowded = self.after + sessions(session("dispatched", started=6))
+        rows = self.rows(crowded)
+        self.assertEqual({row["id"] for row in rows}, {"early", "forked", "dispatched"})
+
+    def test_a_session_appearing_after_the_window_is_not_the_moved_one(self) -> None:
+        cs.follow_moved(self.memory, self.attached, self.before[:1], now_ms=20)
+        cs.follow_moved(self.memory, self.attached, self.before[:1], now_ms=20 + cs.MOVE_WINDOW_MS + 1)
+        rows = self.rows(self.after)
+        self.assertEqual([row["id"] for row in rows], ["early", "forked"])
+
+    def test_the_alias_is_forgotten_once_the_session_ends(self) -> None:
+        self.rows(self.after)
+        self.rows(sessions(session("early", started=1)))
+        self.assertEqual(self.memory.moved, {})
 
 
 class ServiceTests(unittest.TestCase):

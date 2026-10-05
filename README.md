@@ -44,16 +44,20 @@ The supervised `claude-rozi-sessions.watch` service polls `claude agents --json`
 foreground process group. The client is in one of two modes:
 
 - **Running its own conversation.** Claude lists that conversation as an interactive session whose
-  process is in the pane's foreground process group. It is the first row and the active one. The
-  pane publishes rows only when there is at least one background session besides it; a client alone
+  process is in the pane's foreground process group. It is the active row. The pane publishes rows only when there is at least one background session besides it; a client alone
   with its own conversation is left to rozi's ordinary agent detection.
 - **Attached.** After the client switches to a background session, or opens Claude's session list,
   it runs no conversation of its own. The active row is the session whose name Claude shows above
   its prompt, or the last one this extension switched to.
 
-Every background session is listed after that, oldest first, each with the directory it works in,
-so rozi groups it by that directory's project and branch. Interactive sessions in other terminals
-are listed where they run, not here.
+Every background session is listed too, each with the directory it works in, so rozi groups it by
+that directory's project and branch. Interactive sessions in other terminals are listed where they
+run, not here.
+
+Rows are ordered by when each conversation started, the client's own included, and a row keeps the
+place it was first published in. rozi names a pane's rows by position (`Claude Code #2`), so
+switching never renumbers them. A conversation that moves, such as the client's own one going to
+the background, keeps its row: its ID, its place, and the run history rozi keeps for it.
 
 | Claude Code reports | Row status |
 | --- | --- |
@@ -63,6 +67,7 @@ are listed where they run, not here.
 | `done` | `done` |
 | `idle` | `idle` |
 | `stopped` | `idle`, reason "Stopped" |
+| Stopped by a switch, see [Switch sessions](#switch-sessions) | `done` after a finished turn, otherwise `idle`; reason "Stopped" |
 | `failed` | `idle`, reason "Session failed" |
 | Anything else | `working` while Claude reports it busy, otherwise `idle` |
 
@@ -88,7 +93,9 @@ conversation. It types `/resume <session-id>` into Claude's prompt, reads it bac
 and only then presses Enter.
 
 - **From the client's own conversation**, `/resume` moves that conversation to the background,
-  where it keeps running under a new session ID, and attaches the selected one.
+  where it keeps running, and attaches the selected one. Claude lists it there under a new session
+  ID while keeping its transcript under the first, so the extension keeps its row under the first
+  ID, and resumes it by that ID when it is selected again.
 - **From an attached client**, Claude refuses to resume a session that is still running. The
   extension follows Claude's own advice and runs `claude stop <id>` on the selected session first,
   then resumes it in place. The conversation that was on screen stops, saved and resumable, and
@@ -112,9 +119,12 @@ session stays listed to be selected again.
 
 A switch counts only once Claude names the selected session above its prompt: its name, or its
 short ID when it has none. A label that names another session means the switch did not happen.
+Claude draws no name right after a switch from the client's own conversation, so there the switch
+counts once that conversation leaves the client and Claude has refused nothing.
 When the name is shared, an attached client's switch is confirmed instead by the session now
 running in the worker that showed the conversation it replaced. If Claude refuses, the notification
-quotes Claude's answer. If there is no confirmation within ten seconds, a notification says so, and
+quotes Claude's answer. A conversation Claude cannot find, such as one that never got a first
+prompt, is no longer listed. If there is no confirmation within ten seconds, a notification says so, and
 the active row keeps following what Claude itself shows.
 
 To list sessions without ever typing into Claude, set `switching = false`.
