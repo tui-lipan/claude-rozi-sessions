@@ -37,6 +37,9 @@ CONFIRM_INTERVAL = 0.5
 # How long to wait for the typed command to read back from Claude's prompt before giving up.
 VERIFY_ATTEMPTS = 10
 VERIFY_INTERVAL = 0.2
+# How long after a client's own conversation leaves it to wait for Claude to list that
+# conversation again as a background session, under its new id.
+MOVE_WINDOW_MS = 30_000
 # Anything unrecognized falls back on its coarse busy/idle `status`, never on a custom word, which
 # rozi would read as a live run.
 FAILED_STATES = {"failed", "error", "errored", "crashed"}
@@ -57,6 +60,8 @@ SWITCH_FAILURES = (
     "is running in the background",
     "No conversation found",
 )
+# The refusals that mean the conversation cannot be resumed at all.
+GONE_FAILURES = ("was not found", "No conversation found")
 PROMPT = "❯"
 RULE = "─"
 
@@ -107,6 +112,8 @@ class Session:
     status: str
     waiting_for: str | None
     started_at: int
+    # Stopped by this service to make way for another conversation, so Claude no longer lists it.
+    stopped: bool = False
 
     @classmethod
     def from_wire(cls, value: object) -> Session | None:
@@ -130,6 +137,10 @@ class Session:
 
     def row_state(self) -> tuple[str, str | None]:
         """The rozi status this session shows, and why when the word alone does not say."""
+        if self.stopped:
+            # A finished run stays finished, so the row keeps its result and run time.
+            status, _ = replace(self, stopped=False).row_state()
+            return ("done" if status == "done" else "idle"), "Stopped"
         # Only a live process showing a dialog reports `waiting`. Claude also says `blocked` when a
         # finished turn's reply reads as a question; that turn is over, and nothing is stuck.
         if self.status == "waiting":
@@ -147,15 +158,19 @@ class Session:
     def is_working(self) -> bool:
         return self.row_state()[0] == "working"
 
-    def row(self, active: bool) -> dict[str, object]:
+    def row(self, active: bool, conversation: str | None = None) -> dict[str, object]:
+        """This session's row. A background session continuing a conversation started elsewhere
+        is published under that `conversation`, the id Claude resumes it by."""
         status, reason = self.row_state()
+        conversation = conversation or self.session_id
         row: dict[str, object] = {
-            "id": self.session_id,
+            "id": conversation,
             "title": self.name or "",
             "status": status,
             "active": active,
-            # Ties the row to the conversation Claude's own hooks report on, if they run.
-            "native_session": self.session_id,
+            # Ties the row to the conversation Claude's own hooks report on, if they run, and is
+            # what rozi resumes the pane with.
+            "native_session": conversation,
         }
         if reason:
             row["reason"] = reason
@@ -220,6 +235,30 @@ class HostMemory:
     # to. Claude no longer lists a stopped session as running.
     displaced: dict[str, Session] = field(default_factory=dict)
     published: list[dict[str, object]] | None = None
+    # The client's own conversation as last seen, kept after it leaves the client until Claude
+    # lists it again in the background, and when it left.
+    own: Session | None = None
+    own_left_at: int | None = None
+    # Every session id the previous poll listed.
+    seen: set[str] = field(default_factory=set)
+    # Background sessions that continue a conversation this pane listed under another id, mapped to
+    # that conversation. Claude keeps the transcript under the first id and resumes it only by that
+    # id, and the row keeps it too, with its place, so rozi keeps the row's history.
+    moved: dict[str, Session] = field(default_factory=dict)
+    # Where each published row sorts: when its conversation started, as first seen. A
+    # conversation resumed in another worker reports that worker's start, which must not move it.
+    places: dict[str, int] = field(default_factory=dict)
+
+    def origin(self, session: Session) -> Session:
+        """The conversation `session`'s row was first published for."""
+        return self.moved.get(session.session_id, session)
+
+    def session_for_row(self, row_id: str) -> str:
+        """The session a published row stands for now."""
+        for session_id, origin in self.moved.items():
+            if origin.session_id == row_id:
+                return session_id
+        return row_id
 
 
 @dataclass(frozen=True)
@@ -335,7 +374,7 @@ def is_under(path: str | None, root: str | None) -> bool:
 
 
 def listed_sessions(host: Host, sessions: list[Session], scope: str) -> list[Session]:
-    """The conversations one host pane lists: its own, then the background ones, oldest first.
+    """The conversations one host pane lists: its own and the background ones.
 
     Interactive sessions in other terminals are left out; each is listed where it runs.
     """
@@ -345,7 +384,6 @@ def listed_sessions(host: Host, sessions: list[Session], scope: str) -> list[Ses
         if session.kind == "background"
         and (scope == "all" or is_under(session.cwd, host.pane.cwd))
     ]
-    background.sort(key=lambda session: (session.started_at, session.session_id))
     own = [host.interactive] if host.interactive is not None else []
     return own + background
 
@@ -374,6 +412,38 @@ def active_session(
     return None
 
 
+def follow_moved(memory: HostMemory, host: Host, sessions: list[Session], now_ms: int) -> None:
+    """Notice the client's own conversation reappearing in the background under a new id.
+
+    `/resume` from a client's own conversation moves it to the background, where Claude lists it
+    as a new session. The one new background session in the same directory, appearing soon after,
+    is that conversation, and keeps its row.
+    """
+    if host.interactive is not None:
+        memory.own = host.interactive
+        memory.own_left_at = None
+    elif memory.own is not None:
+        if memory.own_left_at is None:
+            memory.own_left_at = now_ms
+        fresh = [
+            session
+            for session in sessions
+            if session.kind == "background"
+            and session.session_id not in memory.seen
+            and session.cwd == memory.own.cwd
+            and session.started_at >= memory.own.started_at
+        ]
+        if len(fresh) == 1:
+            memory.moved[fresh[0].session_id] = memory.origin(memory.own)
+            memory.own = None
+        elif now_ms - memory.own_left_at > MOVE_WINDOW_MS:
+            memory.own = None
+    memory.seen = {session.session_id for session in sessions}
+    for session_id in list(memory.moved):
+        if session_id not in memory.seen and session_id not in memory.displaced:
+            del memory.moved[session_id]
+
+
 def host_rows(
     host: Host,
     sessions: list[Session],
@@ -385,21 +455,37 @@ def host_rows(
 
     A client running only its own conversation is one agent, which rozi already shows; the hooks
     or screen detection speak for it better than a two-second poll.
+
+    Rows are ordered by when each conversation started, wherever it runs now, so switching never
+    renumbers them: rozi names a pane's rows by position.
     """
     listed = listed_sessions(host, sessions, scope)
     running = {session.session_id for session in listed}
-    for session_id in list(memory.displaced):
-        if session_id in running:
+    for session_id, session in list(memory.displaced.items()):
+        # Running again, under its own id or, once resumed, under the conversation's first one.
+        if session_id in running or memory.origin(session).session_id in running:
             del memory.displaced[session_id]
     displaced = [
-        replace(session, state="stopped", kind="background")
-        for session in memory.displaced.values()
+        replace(session, stopped=True, kind="background") for session in memory.displaced.values()
     ]
     everything = listed + displaced
     if host.interactive is not None and len(everything) < 2:
         return []
+    def place(session: Session) -> tuple[int, str]:
+        origin = memory.origin(session)
+        return memory.places.setdefault(origin.session_id, origin.started_at), origin.session_id
+
+    everything.sort(key=place)
+    memory.places = {
+        row_id: started
+        for row_id, started in memory.places.items()
+        if any(memory.origin(session).session_id == row_id for session in everything)
+    }
     active = active_session(host, everything, label, memory.last_target)
-    return [session.row(session.session_id == active) for session in everything]
+    return [
+        session.row(session.session_id == active, memory.origin(session).session_id)
+        for session in everything
+    ]
 
 
 def row_text(row: list[dict[str, Any]]) -> str:
@@ -627,15 +713,16 @@ class Cli:
 def switch(
     cli: Cli,
     host: Host,
-    target_id: str,
+    row_id: str,
     memory: HostMemory,
     sleep: Callable[[float], None] = time.sleep,
 ) -> bool:
-    """Put the host pane's client on `target_id`, or say why not.
+    """Put the host pane's client on the conversation of row `row_id`, or say why not.
 
     Never types into a prompt that holds anything. Reads the typed command back before anything
     irreversible and again right before Enter, and reports success only once Claude shows the
     target. Returns whether it did."""
+    target_id = memory.session_for_row(row_id)
     pane_id = host.pane.pane_id
     sessions = cli.sessions()
     screen = cli.screen(pane_id)
@@ -649,7 +736,7 @@ def switch(
         cli.notify(plan.message, error=True)
         return False
 
-    command = resume_command(plan.target.session_id)
+    command = resume_command(memory.origin(plan.target).session_id)
     cli.type_text(pane_id, command)
     # Claude redraws its prompt, and opens its slash-command hints, a moment after the keys land.
     for attempt in range(VERIFY_ATTEMPTS):
@@ -683,11 +770,14 @@ def switch(
         shown = cli.screen_text(pane_id)
         failure = switch_failure(shown, command)
         if failure is not None:
-            if plan.stop_first:
+            if any(gone in failure for gone in GONE_FAILURES):
+                # Nothing to resume, such as a conversation that never got a first prompt.
+                memory.displaced.pop(plan.target.session_id, None)
+            elif plan.stop_first:
                 keep_stopped(memory, plan.target)
             cli.notify(f"Claude did not switch: {failure}", error=True)
             return False
-        if switch_confirmed(plan, host, shown, cli.sessions()):
+        if switch_confirmed(plan, host, shown, cli.sessions(), memory.origin(plan.target)):
             memory.last_target = plan.target.session_id
             memory.displaced.pop(plan.target.session_id, None)
             if plan.displaces is not None:
@@ -718,28 +808,47 @@ def keep_stopped(memory: HostMemory, session: Session) -> None:
     memory.displaced[session.session_id] = session
 
 
-def switch_confirmed(plan: SwitchPlan, host: Host, shown: str, sessions: list[Session]) -> bool:
+def switch_confirmed(
+    plan: SwitchPlan,
+    host: Host,
+    shown: str,
+    sessions: list[Session],
+    conversation: Session | None = None,
+) -> bool:
     """Whether Claude now shows `plan.target`, from evidence that names the target.
 
     Claude draws the session it shows above its prompt. That label confirms the switch when it
     names the target and nothing else, and refutes it when it names only another conversation.
-    When it is missing or names several, only the process can tell: a session resumed in place
-    runs in the worker that showed the conversation it replaced. The client's own conversation
-    leaving the client is not evidence, because it leaves whichever session opens.
+    Claude draws no label right after `/resume` from a client's own conversation, so there the
+    conversation leaving the client confirms it: the command named the target by its full id,
+    and Claude refused nothing. When the label names several, only the process can tell: a
+    session resumed in place runs in the worker that showed the conversation it replaced.
+
+    `conversation` is the conversation the target continues when it was first listed under
+    another id. Resumed, Claude names and lists it as that conversation again.
     """
     target = plan.target
+    conversation = conversation or target
+    ids = {target.session_id, conversation.session_id}
     label = text_label(shown)
-    names_target = label is not None and label in session_names(target)
-    others = [session for session in sessions if session.session_id != target.session_id]
+    names_target = label is not None and label in session_names(target) | session_names(
+        conversation
+    )
+    others = [session for session in sessions if session.session_id not in ids]
     others += [session for session in (host.interactive, plan.displaces) if session is not None]
     names_other = label is not None and any(label in session_names(other) for other in others)
     if names_target and not names_other:
         return True
     if names_other and not names_target:
         return False
+    if host.interactive is not None:
+        own = host.interactive.session_id
+        return label is None and not any(
+            session.session_id == own and session.kind == "interactive" for session in sessions
+        )
     if plan.displaces is None:
         return False
-    running = next((s for s in sessions if s.session_id == target.session_id), None)
+    running = next((s for s in sessions if s.session_id in ids), None)
     return running is not None and running.pid is not None and running.pid == plan.displaces.pid
 
 
@@ -848,6 +957,7 @@ class SessionsService:
                     label = text_label(self.cli.screen_text(host.pane.pane_id))
                 except SessionsError:
                     label = None
+            follow_moved(memory, host, sessions, int(time.time() * 1000))
             rows = host_rows(host, sessions, self.settings.scope, memory, label)
             self.publish(host.pane.pane_id, rows)
 

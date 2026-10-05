@@ -2,7 +2,7 @@
 id = "claude-rozi-sessions"
 title = "Claude Code sessions"
 description = "One Activity row per Claude Code conversation, grouped by worktree; selecting a row switches Claude to it"
-version = "0.2.1"
+version = "0.2.2"
 api = 1
 min_rozi = "0.0.28"
 homepage = "https://github.com/tui-lipan/claude-rozi-sessions"
