@@ -731,6 +731,115 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual([call[0] for call in cli.calls], ["notify"])
 
 
+class HooksTests(unittest.TestCase):
+    """The offer to install rozi's Claude Code hook plugin."""
+
+    def test_rozis_plugin_is_found_from_any_marketplace_enabled_or_not(self) -> None:
+        def listed(*entries: dict[str, object]) -> bool:
+            return cs.has_hooks_plugin(json.dumps(list(entries)))
+
+        self.assertTrue(listed({"id": "rozi@rozi", "enabled": True}))
+        self.assertTrue(listed({"id": "rozi@rozi-checkout", "enabled": False}))
+        self.assertFalse(listed({"id": "rust-analyzer-lsp@claude-plugins-official"}))
+        self.assertFalse(listed({"id": "rozi-extras@rozi"}))
+        self.assertFalse(listed())
+        with self.assertRaises(cs.SessionsError):
+            cs.has_hooks_plugin("not json")
+
+    def service(self, installed, settings=None, hosts=True):
+        cli = FakeCli([], [])
+        if isinstance(installed, Exception):
+            def hooks_installed():
+                raise installed
+        else:
+            def hooks_installed():
+                cli.calls.append(("hooks_installed",))
+                return installed
+        cli.hooks_installed = hooks_installed
+        cli.panes = lambda: [pane()] if hosts else []
+        service = cs.SessionsService(settings or cs.Settings(), cli=cli)
+        service.publish = lambda pane_id, rows: None
+        return service, cli
+
+    def test_a_missing_plugin_is_suggested_once_per_run(self) -> None:
+        service, cli = self.service(installed=False)
+        service.poll()
+        service.poll()
+        notices = [call for call in cli.calls if call[0] == "notify"]
+        self.assertEqual(notices, [("notify", cs.HOOKS_NOTICE)])
+        self.assertEqual(cli.calls.count(("hooks_installed",)), 1)
+
+    def test_nothing_is_suggested_when_it_is_installed_unwanted_or_unused(self) -> None:
+        for service, cli in (
+            self.service(installed=True),
+            self.service(installed=False, settings=cs.Settings(suggest_hooks=False)),
+            self.service(installed=False, hosts=False),
+            self.service(installed=cs.SessionsError("unknown option '--json'")),
+        ):
+            service.poll()
+            self.assertNotIn("notify", [call[0] for call in cli.calls])
+
+
+def load_installer():
+    path = SCRIPT.parent / "install_hooks.py"
+    spec = importlib.util.spec_from_file_location("install_hooks_example", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+ih = load_installer()
+
+
+class InstallerCli:
+    def __init__(self, installed=False, fail=None):
+        self.settings = cs.Settings(claude="claude")
+        self.installed = installed
+        self.fail = fail
+        self.calls: list[tuple] = []
+
+    def hooks_installed(self):
+        return self.installed
+
+    def run(self, args, timeout=0.0):
+        self.calls.append(("run", tuple(args[1:])))
+        if self.fail and self.fail in args:
+            raise ih.cs.SessionsError(f"claude plugin {self.fail} failed: offline")
+        return ""
+
+    def notify(self, message, *, error=False):
+        self.calls.append(("notify", message, error))
+
+
+class InstallerTests(unittest.TestCase):
+    def test_install_adds_the_marketplace_then_the_plugin(self) -> None:
+        cli = InstallerCli()
+        ih.install(cli)
+        self.assertEqual(
+            cli.calls[:2],
+            [
+                ("run", ("plugin", "marketplace", "add", "tui-lipan/rozi")),
+                ("run", ("plugin", "install", "rozi@rozi")),
+            ],
+        )
+        self.assertIn("Restart Claude Code", cli.calls[-1][1])
+        self.assertFalse(cli.calls[-1][2])
+
+    def test_an_installed_plugin_is_left_alone(self) -> None:
+        cli = InstallerCli(installed=True)
+        ih.install(cli)
+        self.assertEqual([call[0] for call in cli.calls], ["notify"])
+        self.assertIn("already installed", cli.calls[0][1])
+
+    def test_a_failure_is_reported_once_as_an_error(self) -> None:
+        cli = InstallerCli(fail="install")
+        ih.install(cli)
+        notices = [call for call in cli.calls if call[0] == "notify"]
+        self.assertEqual(len(notices), 1)
+        self.assertIn("offline", notices[0][1])
+        self.assertTrue(notices[0][2])
+
+
 class SettingsTests(unittest.TestCase):
     def test_settings_fall_back_to_defaults(self) -> None:
         settings = cs.Settings.from_environment(

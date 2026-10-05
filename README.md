@@ -37,6 +37,10 @@ Later releases can be applied with `rozi extensions update claude-rozi-sessions`
 
 Start `claude` in a rozi pane and send work to the background from it.
 
+For live status of the conversation on screen, also install
+[rozi's Claude Code plugin](#with-rozis-claude-code-plugin): run **Install Claude Code hooks** from
+the command palette.
+
 ## What is listed
 
 The supervised `claude-rozi-sessions.watch` service polls `claude agents --json` and
@@ -85,6 +89,21 @@ with the same ID, so that row shows the hooks' live state while every other row 
 Claude runs no hooks in the pane when the client attaches to a background session, so the hooks'
 last report goes stale. rozi keeps it out of the list once no row names its conversation, and
 restores the active row's conversation when the session is resurrected.
+
+The plugin is optional, and this extension never installs it on its own: it changes Claude Code's
+setup for every session, inside rozi or not. When Claude is in use and the plugin is not installed,
+the extension says so in one notification per run. To install it, run **Install Claude Code
+hooks** from the command palette, or `rozi run-action claude-rozi-sessions.install-hooks`. That
+runs Claude Code's own commands, the same as installing it by hand:
+
+```bash
+claude plugin marketplace add tui-lipan/rozi
+claude plugin install rozi@rozi
+```
+
+Then restart Claude Code in its panes. A plugin named `rozi` from any marketplace counts as
+installed, enabled or not, so a disabled one is not suggested again. Set `suggest_hooks = false`
+to never mention it.
 
 ## Switch sessions
 
@@ -139,6 +158,7 @@ claude = "claude"   # the Claude Code executable
 poll_seconds = 2    # 0.5 to 60
 scope = "all"       # or "cwd"
 switching = true    # false: never type into Claude
+suggest_hooks = true  # false: never suggest rozi's Claude Code plugin
 ```
 
 With `scope = "all"`, the pane lists every background session on the machine, like Claude's own
