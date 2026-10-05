@@ -8,8 +8,9 @@ sessions it runs, publishes one row per session into the pane with the directory
 answers a row activation by switching the client to that conversation through Claude's own
 `/resume` command.
 
-Everything goes through public interfaces: `claude agents --json`, `claude stop`, and rozi's
-`list-panes`, `capture-pane`, `send-text`, `send-keys`, `notify`, and `publish`.
+Everything goes through public interfaces: `claude agents --json`, `claude stop`,
+`claude plugin list --json`, and rozi's `list-panes`, `capture-pane`, `send-text`, `send-keys`,
+`notify`, and `publish`.
 """
 
 from __future__ import annotations
@@ -30,6 +31,13 @@ from typing import Any, Callable
 ROZI = os.environ.get("ROZI_BIN", "rozi")
 EXTENSION_ID = "claude-rozi-sessions"
 COMMAND_TIMEOUT = 5.0
+# rozi's Claude Code plugin: its hooks report the live state of the conversation a client shows.
+HOOKS_PLUGIN = "rozi"
+HOOKS_MARKETPLACE = "tui-lipan/rozi"
+HOOKS_NOTICE = (
+    "For live status of the conversation on screen, install rozi's Claude Code hooks: run "
+    "“Install Claude Code hooks” from the command palette. suggest_hooks = false hides this."
+)
 # How long to wait for Claude to show the selected session after `/resume`: Claude resumes a
 # conversation in a second or two, and a stopped one can take longer to load.
 CONFIRM_ATTEMPTS = 20
@@ -76,6 +84,7 @@ class Settings:
     poll_seconds: float = 2.0
     scope: str = "all"
     switching: bool = True
+    suggest_hooks: bool = True
 
     @classmethod
     def from_environment(cls, environ: dict[str, str]) -> Settings:
@@ -88,6 +97,7 @@ class Settings:
         claude = values.get("claude")
         scope = values.get("scope")
         switching = values.get("switching")
+        suggest_hooks = values.get("suggest_hooks")
         try:
             poll = float(values.get("poll_seconds", cls.poll_seconds))
         except (TypeError, ValueError):
@@ -97,6 +107,9 @@ class Settings:
             poll_seconds=min(max(poll, 0.5), 60.0),
             scope=scope if scope in {"all", "cwd"} else cls.scope,
             switching=switching if isinstance(switching, bool) else cls.switching,
+            suggest_hooks=(
+                suggest_hooks if isinstance(suggest_hooks, bool) else cls.suggest_hooks
+            ),
         )
 
 
@@ -317,6 +330,21 @@ def parse_sessions(output: str) -> list[Session]:
     if not isinstance(data, list):
         raise SessionsError("claude agents --json returned a non-list payload")
     return [session for item in data if (session := Session.from_wire(item)) is not None]
+
+
+def has_hooks_plugin(output: str) -> bool:
+    """Whether `claude plugin list --json` lists rozi's plugin, from any marketplace, enabled or
+    not: a disabled one was turned off on purpose."""
+    try:
+        data = json.loads(output)
+    except json.JSONDecodeError as error:
+        raise SessionsError("claude plugin list --json returned invalid JSON") from error
+    if not isinstance(data, list):
+        raise SessionsError("claude plugin list --json returned a non-list payload")
+    return any(
+        isinstance(item, dict) and (text(item.get("id")) or "").split("@")[0] == HOOKS_PLUGIN
+        for item in data
+    )
 
 
 def response_data(output: str, command: str) -> Any:
@@ -642,14 +670,14 @@ class Cli:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
 
-    def run(self, args: list[str]) -> str:
+    def run(self, args: list[str], timeout: float = COMMAND_TIMEOUT) -> str:
         try:
             result = subprocess.run(
                 args,
                 text=True,
                 capture_output=True,
                 stdin=subprocess.DEVNULL,
-                timeout=COMMAND_TIMEOUT,
+                timeout=timeout,
                 check=False,
             )
         except (OSError, subprocess.SubprocessError) as error:
@@ -661,6 +689,9 @@ class Cli:
 
     def sessions(self) -> list[Session]:
         return parse_sessions(self.run([self.settings.claude, "agents", "--json"]))
+
+    def hooks_installed(self) -> bool:
+        return has_hooks_plugin(self.run([self.settings.claude, "plugin", "list", "--json"]))
 
     def stop(self, session: Session) -> None:
         self.run([self.settings.claude, "stop", session.short_id])
@@ -878,6 +909,7 @@ class SessionsService:
         self.hosts: dict[int, Host] = {}
         self.next_token = 1
         self.reported_error: str | None = None
+        self.hooks_checked = False
 
     def start_publisher(self, pane_id: int) -> Publisher:
         token = self.next_token
@@ -960,6 +992,21 @@ class SessionsService:
             follow_moved(memory, host, sessions, int(time.time() * 1000))
             rows = host_rows(host, sessions, self.settings.scope, memory, label)
             self.publish(host.pane.pane_id, rows)
+        if hosts:
+            self.suggest_hooks()
+
+    def suggest_hooks(self) -> None:
+        """Once a run, when Claude is in use, point out rozi's hook plugin if it is missing."""
+        if self.hooks_checked or not self.settings.suggest_hooks:
+            return
+        self.hooks_checked = True
+        try:
+            installed = self.cli.hooks_installed()
+        except SessionsError:
+            # An older Claude without `plugin list --json`: nothing reliable to suggest.
+            return
+        if not installed:
+            self.cli.notify(HOOKS_NOTICE)
 
     def activate(self, pane_id: int, row_id: str) -> None:
         host = self.hosts.get(pane_id)
