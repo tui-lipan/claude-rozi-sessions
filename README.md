@@ -125,11 +125,16 @@ The extension does not switch, and says why in a rozi notification, when:
 - Claude's prompt holds unsent text. Claude's dim placeholder does not count.
 - Claude is showing a question, an approval dialog, or any screen without its prompt.
 - Claude is showing its own session list, whose prompt starts a new session.
-- A response is still streaming.
-- From an attached client, the conversation on screen or the selected one is still working.
-  Stopping either would cut a turn short.
+- From an attached client, the selected session is still working. Stopping it would cut its turn
+  short.
 - It cannot tell which session an attached client shows, because no name matches exactly one row.
 - The selected session has ended.
+
+While Claude is responding, the switch does not interrupt it. Claude queues the command and runs
+it once the turn ends, and the extension says so in a notification and follows the queued switch
+until it happens: the conversation on screen finishes its turn first. Selecting another row
+meanwhile is refused, so switches do not pile up in Claude's queue. Clearing the queue in Claude
+cancels the switch.
 
 If the command does not read back exactly, for example because someone typed at the same moment,
 it is left in the prompt unsent. When the selected session has to be stopped first, the prompt is
@@ -143,8 +148,9 @@ counts once that conversation leaves the client and Claude has refused nothing.
 When the name is shared, an attached client's switch is confirmed instead by the session now
 running in the worker that showed the conversation it replaced. If Claude refuses, the notification
 quotes Claude's answer. A conversation Claude cannot find, such as one that never got a first
-prompt, is no longer listed. If there is no confirmation within ten seconds, a notification says so, and
-the active row keeps following what Claude itself shows.
+prompt, is no longer listed. If there is no confirmation within ten seconds of sending the switch,
+or of a queued switch's turn ending, or a queued switch waits more than 30 minutes, a notification
+says so, and the active row keeps following what Claude itself shows.
 
 To list sessions without ever typing into Claude, set `switching = false`.
 
