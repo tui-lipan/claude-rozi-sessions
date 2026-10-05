@@ -58,10 +58,13 @@ AGENT_VIEW_MARKERS = (
     "Your conversation moved to the background",
     "enter to return",
 )
-# A turn still streaming. The footer hint is shown while the prompt is empty, which is the only
-# state a switch proceeds from; the activity line covers a turn whose hint has scrolled away.
-WORKING_FOOTER = "esc to interrupt"
-WORKING_LINE = re.compile(r"^\s*[*·✢✶✻✽]\s+\S.*…(?:\s+\(\d+[smh](?:\s|·)|\s*$)")
+# Shown while Claude holds input sent during a running turn, to act on once the turn ends. A
+# switch sent then waits for the turn instead of cutting it short.
+QUEUED_MARKERS = ("edit queued messages", "to send now")
+# How long a queued switch is followed before the active row is left to Claude alone.
+QUEUE_LIMIT_MS = 30 * 60_000
+# How long a switch may go unconfirmed once Claude no longer shows it queued.
+SETTLE_MS = int(CONFIRM_ATTEMPTS * CONFIRM_INTERVAL * 1000)
 # Claude's answers to a `/resume` it did not carry out.
 SWITCH_FAILURES = (
     "was not found",
@@ -248,6 +251,8 @@ class HostMemory:
     # to. Claude no longer lists a stopped session as running.
     displaced: dict[str, Session] = field(default_factory=dict)
     published: list[dict[str, object]] | None = None
+    # A switch Claude queued behind a running turn, followed by later polls.
+    pending: PendingSwitch | None = None
     # The client's own conversation as last seen, kept after it leaves the client until Claude
     # lists it again in the background, and when it left.
     own: Session | None = None
@@ -284,7 +289,6 @@ class Composer:
 class Screen:
     agent_view: bool
     composer: Composer | None
-    working: bool
     label: str | None
 
     @property
@@ -564,7 +568,6 @@ def read_screen(frame_rows: list[list[dict[str, Any]]]) -> Screen:
     return Screen(
         agent_view=any(marker in joined for marker in AGENT_VIEW_MARKERS),
         composer=read_composer(frame_rows[span[0] : span[1]]) if span else None,
-        working=WORKING_FOOTER in joined or any(WORKING_LINE.match(line) for line in texts),
         label=rule_label(texts[span[0] - 1]) if span else None,
     )
 
@@ -608,8 +611,6 @@ def switch_refusal(screen: Screen) -> Refusal | None:
         return Refusal(
             "Claude is showing a question or a dialog. Answer it, then select the row again."
         )
-    if screen.working:
-        return Refusal("Claude is still responding. Select the row again once it finishes.")
     if screen.draft:
         return Refusal(
             "Claude's prompt has unsent text. Send or clear it, then select the row again."
@@ -628,6 +629,19 @@ class SwitchPlan:
     displaces: Session | None
 
 
+@dataclass
+class PendingSwitch:
+    """A switch sent while Claude was responding, which Claude carries out once the turn ends."""
+
+    plan: SwitchPlan
+    # The client as it was when the switch was sent.
+    host: Host
+    command: str
+    queued_at: int
+    # When Claude stopped showing the command queued without having switched.
+    unqueued_at: int | None = None
+
+
 def plan_switch(
     host: Host,
     target_id: str,
@@ -642,18 +656,14 @@ def plan_switch(
     if host.interactive is not None:
         # `/resume` here moves the client's own conversation to the background, still running.
         return SwitchPlan(target=target, stop_first=False, displaces=None)
-    # An attached client can only resume a session that is not running, and resuming replaces
-    # the conversation on screen. Both must be idle, so no running turn is cut short.
+    # An attached client can only resume a session that is not running, so a running target is
+    # stopped first, and it must be idle so no turn is cut short. The conversation on screen may
+    # be working: Claude holds the command until its turn ends, then resumes in its place.
     current = by_id.get(active) if active else None
     if current is None:
         return Refusal(
             "Cannot tell which Claude session is on screen. Switch in Claude with ←, or attach "
             f"with `claude attach {target.short_id}`."
-        )
-    if current.is_working():
-        return Refusal(
-            f"“{current.name or current.short_id}” is still working. Select the row again once "
-            "it finishes."
         )
     running = target_id in by_id
     if running and target.is_working():
@@ -755,6 +765,13 @@ def switch(
     target. Returns whether it did."""
     target_id = memory.session_for_row(row_id)
     pane_id = host.pane.pane_id
+    if memory.pending is not None:
+        cli.notify(
+            f"Claude switches to “{label_of(memory.pending.plan.target)}” once it finishes "
+            "responding. Select another row after that.",
+            error=True,
+        )
+        return False
     sessions = cli.sessions()
     screen = cli.screen(pane_id)
     listed = listed_sessions(host, sessions, "all") + list(memory.displaced.values())
@@ -785,10 +802,11 @@ def switch(
         return False
     if plan.stop_first:
         cli.stop(plan.target)
+        # Listed as stopped until Claude shows it, however long a queued switch waits.
+        keep_stopped(memory, plan.target)
         # Stopping takes a moment, and the prompt is the user's the whole time. Read it again
         # right before Enter, so nothing typed meanwhile is submitted with the command.
         if not prompt_holds(cli.screen(pane_id), command):
-            keep_stopped(memory, plan.target)
             cli.notify(
                 "Claude's prompt changed while switching, so nothing was sent. "
                 f"“{label_of(plan.target)}” was stopped and can be selected again.",
@@ -798,32 +816,76 @@ def switch(
     cli.press(pane_id, "Enter")
     for attempt in range(CONFIRM_ATTEMPTS):
         sleep(CONFIRM_INTERVAL)
-        shown = cli.screen_text(pane_id)
-        failure = switch_failure(shown, command)
-        if failure is not None:
-            if any(gone in failure for gone in GONE_FAILURES):
-                # Nothing to resume, such as a conversation that never got a first prompt.
-                memory.displaced.pop(plan.target.session_id, None)
-            elif plan.stop_first:
-                keep_stopped(memory, plan.target)
-            cli.notify(f"Claude did not switch: {failure}", error=True)
+        outcome, queued = settle(cli, memory, plan, host, command)
+        if outcome is not None:
+            return outcome
+        if queued:
+            # Claude is responding and holds the command until the turn ends; the polls follow it.
+            memory.pending = PendingSwitch(
+                plan=plan, host=host, command=command, queued_at=int(time.time() * 1000)
+            )
+            cli.notify(f"Claude switches to “{label_of(plan.target)}” once it finishes responding.")
             return False
-        if switch_confirmed(plan, host, shown, cli.sessions(), memory.origin(plan.target)):
-            memory.last_target = plan.target.session_id
+    give_up(cli, memory, plan)
+    return False
+
+
+def settle(
+    cli: Cli, memory: HostMemory, plan: SwitchPlan, host: Host, command: str
+) -> tuple[bool | None, bool]:
+    """One look at a sent switch: whether it happened, `None` while undecided, and whether
+    Claude still holds it queued. Records the outcome and reports a refusal."""
+    shown = cli.screen_text(host.pane.pane_id)
+    failure = switch_failure(shown, command)
+    if failure is not None:
+        if any(gone in failure for gone in GONE_FAILURES):
+            # Nothing to resume, such as a conversation that never got a first prompt.
             memory.displaced.pop(plan.target.session_id, None)
-            if plan.displaces is not None:
-                memory.displaced[plan.displaces.session_id] = plan.displaces
-            return True
-    # No answer either way. Claude may still switch, so nothing is recorded as on screen: the
-    # active row keeps following what Claude itself shows.
-    if plan.stop_first:
-        keep_stopped(memory, plan.target)
+        cli.notify(f"Claude did not switch: {failure}", error=True)
+        return False, False
+    if switch_confirmed(plan, host, shown, cli.sessions(), memory.origin(plan.target)):
+        memory.last_target = plan.target.session_id
+        memory.displaced.pop(plan.target.session_id, None)
+        if plan.displaces is not None:
+            displaced = plan.displaces
+            if displaced.is_working():
+                # Claude switched only once its turn had ended.
+                displaced = replace(displaced, state="done", status="idle")
+            memory.displaced[displaced.session_id] = displaced
+        return True, False
+    return None, any(marker in shown for marker in QUEUED_MARKERS)
+
+
+def give_up(cli: Cli, memory: HostMemory, plan: SwitchPlan) -> None:
+    """No answer either way. Claude may still switch, so nothing is recorded as on screen: the
+    active row keeps following what Claude itself shows."""
     cli.notify(
         f"Could not confirm that Claude switched to “{label_of(plan.target)}”. "
         "Check the pane before selecting another row.",
         error=True,
     )
-    return False
+
+
+def follow_pending(cli: Cli, memory: HostMemory, now_ms: int) -> None:
+    """Settle a switch Claude queued behind a running turn, once the turn has ended."""
+    pending = memory.pending
+    if pending is None:
+        return
+    outcome, queued = settle(cli, memory, pending.plan, pending.host, pending.command)
+    if outcome is not None:
+        memory.pending = None
+        return
+    if queued:
+        pending.unqueued_at = None
+        if now_ms - pending.queued_at <= QUEUE_LIMIT_MS:
+            return
+    elif pending.unqueued_at is None:
+        pending.unqueued_at = now_ms
+        return
+    elif now_ms - pending.unqueued_at <= SETTLE_MS:
+        return
+    memory.pending = None
+    give_up(cli, memory, pending.plan)
 
 
 def prompt_holds(screen: Screen, command: str) -> bool:
@@ -989,7 +1051,13 @@ class SessionsService:
                     label = text_label(self.cli.screen_text(host.pane.pane_id))
                 except SessionsError:
                     label = None
-            follow_moved(memory, host, sessions, int(time.time() * 1000))
+            now = int(time.time() * 1000)
+            if memory.pending is not None:
+                try:
+                    follow_pending(self.cli, memory, now)
+                except SessionsError:
+                    pass
+            follow_moved(memory, host, sessions, now)
             rows = host_rows(host, sessions, self.settings.scope, memory, label)
             self.publish(host.pane.pane_id, rows)
         if hosts:

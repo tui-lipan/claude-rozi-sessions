@@ -275,11 +275,10 @@ class ScreenTests(unittest.TestCase):
         self.assertTrue(screen.agent_view)
         self.assertIn("session list", cs.switch_refusal(screen).message)
 
-    def test_a_running_turn_is_not_interrupted(self) -> None:
-        streaming = prompt() + frame("  esc to interrupt")
-        self.assertIn("still responding", cs.switch_refusal(cs.read_screen(streaming)).message)
+    def test_a_running_turn_does_not_stop_a_switch(self) -> None:
+        # Claude holds a command sent mid-turn until the turn ends, so nothing is cut short.
         spinner = frame("✶ Pondering… (12s · esc to interrupt)") + prompt()
-        self.assertTrue(cs.read_screen(spinner).working)
+        self.assertIsNone(cs.switch_refusal(cs.read_screen(spinner)))
 
     def test_the_session_name_above_the_prompt_is_read(self) -> None:
         self.assertEqual(cs.read_screen(prompt(label="rozi-lab-bg-one")).label, "rozi-lab-bg-one")
@@ -436,15 +435,24 @@ class SwitchTests(unittest.TestCase):
         self.assertEqual(len(actions(cli)), 1)
         self.assertIn("ended", actions(cli)[0][1])
 
-    def test_working_sessions_are_not_cut_short(self) -> None:
+    def test_a_working_conversation_on_screen_does_not_stop_a_switch(self) -> None:
         host = cs.Host(pane=pane(), interactive=None)
         shown_busy = sessions(
-            session("shown-id", name="shown", state="working"), session("target-id")
+            session("shown-id", name="shown", state="working"), session("target-id", name="t")
         )
-        cli = FakeCli(shown_busy, [prompt(label="shown")])
-        self.assertFalse(self.run_switch(cli, host, "target-id"))
-        self.assertIn("still working", actions(cli)[0][1])
+        cli = FakeCli(
+            shown_busy,
+            [prompt(label="shown"), prompt(typed="/resume target-id", label="shown")],
+            after=showing("t"),
+        )
+        self.assertTrue(self.run_switch(cli, host, "target-id"))
+        self.assertEqual(
+            actions(cli),
+            [("type", "/resume target-id"), ("stop", "target-i"), ("press", "Enter")],
+        )
 
+    def test_a_working_target_is_not_cut_short(self) -> None:
+        host = cs.Host(pane=pane(), interactive=None)
         target_busy = sessions(
             session("shown-id", name="shown"), session("target-id", name="t", state="working")
         )
@@ -595,6 +603,112 @@ class SwitchTests(unittest.TestCase):
         cli = FakeCli(listed, [prompt(typed="a draft is fine here")])
         self.assertTrue(self.run_switch(cli, host, "own"))
         self.assertEqual(actions(cli), [])
+
+
+def queued(label: str, command: str) -> str:
+    """A capture of Claude still responding, holding `command` until the turn ends."""
+    return (
+        f"● a long reply\n❯ {command}\n  ctrl+x ctrl+s to send now\n"
+        f"{RULE} {label} ─\n❯ Press up to edit queued messages\n{RULE}\n  footer"
+    )
+
+
+class QueuedSwitchTests(unittest.TestCase):
+    """A switch sent while Claude responds waits for the turn, followed across polls."""
+
+    def setUp(self) -> None:
+        self.memory = cs.HostMemory()
+        self.listed = sessions(
+            session("own", kind="interactive", pid=500, name="mine"), session("target-id", pid=9)
+        )
+        self.host = cs.Host(pane=pane(), interactive=self.listed[0])
+        self.cli = FakeCli(
+            self.listed,
+            [prompt(label="mine"), prompt(typed="/resume target-id", label="mine")],
+            after=queued("mine", "/resume target-id"),
+        )
+        self.assertFalse(cs.switch(self.cli, self.host, "target-id", self.memory, sleep=lambda _: None))
+
+    def test_a_queued_switch_is_announced_and_followed(self) -> None:
+        self.assertIsNotNone(self.memory.pending)
+        self.assertIn("once it finishes responding", actions(self.cli)[-1][1])
+        self.assertEqual(
+            [call[0] for call in actions(self.cli)], ["type", "press", "notify"]
+        )
+        # Still responding a long while later: still followed, nothing reported.
+        cs.follow_pending(self.cli, self.memory, now_ms=self.memory.pending.queued_at + 60_000)
+        self.assertIsNotNone(self.memory.pending)
+        self.assertEqual(len(actions(self.cli)), 3)
+        # The turn ended and Claude switched: the own conversation left the client.
+        self.cli.after = ["● reply\n❯"]
+        self.cli.listed = sessions(session("forked", pid=8), session("target-id", pid=9))
+        cs.follow_pending(self.cli, self.memory, now_ms=self.memory.pending.queued_at + 61_000)
+        self.assertIsNone(self.memory.pending)
+        self.assertEqual(self.memory.last_target, "target-id")
+
+    def test_another_row_waits_for_the_queued_switch(self) -> None:
+        cli = FakeCli(self.listed, [prompt(label="mine")])
+        self.assertFalse(cs.switch(cli, self.host, "own", self.memory, sleep=lambda _: None))
+        self.assertEqual([call[0] for call in actions(cli)], ["notify"])
+        self.assertIn("once it finishes responding", actions(cli)[0][1])
+
+    def test_a_queue_that_empties_without_a_switch_is_reported(self) -> None:
+        start = self.memory.pending.queued_at
+        # The user cleared the queue: Claude keeps its own conversation on screen.
+        self.cli.after = [showing("mine")]
+        cs.follow_pending(self.cli, self.memory, now_ms=start + 1_000)
+        self.assertIsNotNone(self.memory.pending)
+        cs.follow_pending(self.cli, self.memory, now_ms=start + 1_000 + cs.SETTLE_MS + 1)
+        self.assertIsNone(self.memory.pending)
+        self.assertIn("Could not confirm", actions(self.cli)[-1][1])
+        self.assertIsNone(self.memory.last_target)
+
+    def test_a_turn_longer_than_the_limit_is_no_longer_followed(self) -> None:
+        start = self.memory.pending.queued_at
+        cs.follow_pending(self.cli, self.memory, now_ms=start + cs.QUEUE_LIMIT_MS + 1)
+        self.assertIsNone(self.memory.pending)
+        self.assertIn("Could not confirm", actions(self.cli)[-1][1])
+
+
+class QueuedResumeInPlaceTests(unittest.TestCase):
+    def test_a_queued_switch_back_to_a_moved_conversation_survives_the_polls(self) -> None:
+        before = sessions(
+            session("early", started=1, name="early", pid=40),
+            session("own", kind="interactive", pid=500, started=2, name="mine"),
+        )
+        (host,) = cs.classify([pane()], before, group_of=lambda pid: pid)
+        attached = cs.Host(pane=pane(), interactive=None)
+        memory = cs.HostMemory()
+        cs.follow_moved(memory, host, before, now_ms=10)
+        moved = sessions(
+            session("early", started=1, name="early", pid=40, state="working"),
+            session("job", started=5, name="mine (2)", pid=41),
+        )
+        cs.follow_moved(memory, attached, moved, now_ms=20)
+        cli = FakeCli(
+            moved,
+            [prompt(label="early"), prompt(typed="/resume own", label="early")],
+            after=queued("early", "/resume own"),
+        )
+        self.assertFalse(cs.switch(cli, attached, "own", memory, sleep=lambda _: None))
+        self.assertIsNotNone(memory.pending)
+        # Polls run while "early" finishes its turn; the stopped job stays listed under its row.
+        stopped = sessions(session("early", started=1, name="early", pid=40, state="working"))
+        cs.follow_moved(memory, attached, stopped, now_ms=30)
+        rows = cs.host_rows(attached, stopped, "all", memory, "early")
+        self.assertEqual([(row["id"], row["reason"] if "reason" in row else None) for row in rows], [("early", None), ("own", "Stopped")])
+        # The turn ends and Claude resumes the conversation in the worker that showed "early".
+        cli.after = [showing("mine")]
+        cli.listed = sessions(session("own", started=1, name="mine", pid=40))
+        cs.follow_pending(cli, memory, now_ms=memory.pending.queued_at + 40_000)
+        self.assertIsNone(memory.pending)
+        self.assertEqual(memory.last_target, "job")
+        # "early" was streaming when the switch was sent; it is listed with its turn finished.
+        rows = cs.host_rows(attached, cli.listed, "all", memory, "mine")
+        self.assertEqual(
+            [(row["id"], row["status"], row.get("reason")) for row in rows],
+            [("early", "done", "Stopped"), ("own", "done", None)],
+        )
 
 
 class MovedConversationTests(unittest.TestCase):
