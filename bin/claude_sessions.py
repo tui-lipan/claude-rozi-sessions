@@ -9,7 +9,7 @@ answers a row activation by switching the client to that conversation through Cl
 `/resume` command.
 
 Everything goes through public interfaces: `claude agents --json`, `claude stop`,
-`claude plugin list --json`, and rozi's `list-panes`, `capture-pane`, `send-text`, `send-keys`,
+`claude plugin list --json`, `git rev-parse`, and rozi's `list-panes`, `capture-pane`, `send-text`, `send-keys`,
 `notify`, and `publish`.
 """
 
@@ -642,17 +642,50 @@ class PendingSwitch:
     unqueued_at: int | None = None
 
 
+def same_repository(
+    here: str | None, there: str | None, repository: Callable[[str], str | None]
+) -> bool:
+    """Whether a session working in `there` is one a client started in `here` can resume by ID.
+
+    Claude's `/resume <id>` finds conversations of the client's own repository only: its own
+    directory and the repository's other Git worktrees. Anything else is "not found". An unknown
+    directory is not held against the switch.
+    """
+    if not here or not there:
+        return True
+    if os.path.normpath(here) == os.path.normpath(there):
+        return True
+    ours = repository(here)
+    return ours is not None and ours == repository(there)
+
+
+def display_path(path: str | None) -> str:
+    if not path:
+        return "another directory"
+    home = os.path.expanduser("~")
+    return "~" + path[len(home) :] if is_under(path, home) else path
+
+
 def plan_switch(
     host: Host,
     target_id: str,
     sessions: list[Session],
     memory: HostMemory,
     active: str | None,
+    repository: Callable[[str], str | None] = lambda path: None,
 ) -> SwitchPlan | Refusal:
     by_id = {session.session_id: session for session in sessions}
     target = by_id.get(target_id) or memory.displaced.get(target_id)
     if target is None:
         return Refusal("That Claude session has ended, so there is nothing to switch to.")
+    # Checked before anything is stopped or typed: Claude would answer "not found" only after the
+    # target had been stopped for nothing.
+    if not same_repository(host.pane.cwd, target.cwd, repository):
+        return Refusal(
+            f"“{label_of(target)}” works in {display_path(target.cwd)}, outside this Claude's "
+            "repository, and Claude resumes only its own repository's sessions. Open it with ← "
+            f"in Claude, or run `claude attach {target.short_id}`."
+        )
     if host.interactive is not None:
         # `/resume` here moves the client's own conversation to the background, still running.
         return SwitchPlan(target=target, stop_first=False, displaces=None)
@@ -699,6 +732,16 @@ class Cli:
 
     def sessions(self) -> list[Session]:
         return parse_sessions(self.run([self.settings.claude, "agents", "--json"]))
+
+    def repository(self, path: str) -> str | None:
+        """The Git repository `path` belongs to, shared by all of its worktrees, if any."""
+        try:
+            output = self.run(
+                ["git", "-C", path, "rev-parse", "--path-format=absolute", "--git-common-dir"]
+            )
+        except SessionsError:
+            return None
+        return text(output)
 
     def hooks_installed(self) -> bool:
         return has_hooks_plugin(self.run([self.settings.claude, "plugin", "list", "--json"]))
@@ -779,7 +822,7 @@ def switch(
     if target_id == active:
         return True
     refusal = switch_refusal(screen)
-    plan = refusal or plan_switch(host, target_id, sessions, memory, active)
+    plan = refusal or plan_switch(host, target_id, sessions, memory, active, cli.repository)
     if isinstance(plan, Refusal):
         cli.notify(plan.message, error=True)
         return False
