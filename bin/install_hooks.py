@@ -25,6 +25,7 @@ def install(cli: cs.Cli) -> None:
     claude = cli.settings.claude
     try:
         if cli.hooks_installed():
+            cli.offer_command(cs.INSTALL_HOOKS_COMMAND, False)
             cli.notify("rozi's Claude Code hooks are already installed.")
             return
         cli.run(
@@ -37,6 +38,8 @@ def install(cli: cs.Cli) -> None:
     except cs.SessionsError as error:
         cli.notify(f"Could not install rozi's Claude Code hooks: {error}", error=True)
         return
+    # Nothing left to offer: the command leaves the palette until the plugin is missing again.
+    cli.offer_command(cs.INSTALL_HOOKS_COMMAND, False)
     cli.notify(
         "Installed rozi's Claude Code hooks. Restart Claude Code in its panes to start them."
     )

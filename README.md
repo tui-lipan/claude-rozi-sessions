@@ -18,7 +18,7 @@ Activity
 
 ## Requirements
 
-- rozi 0.0.28 or newer
+- rozi 0.0.29 or newer, for commands listed in the command palette only when they apply
 - Claude Code 2.1.285 or newer, for `claude agents --json` and `/resume` of a background session
 - Python 3 available as `python`
 - Linux or macOS. See [Limits](#limits).
@@ -101,7 +101,9 @@ claude plugin marketplace add tui-lipan/rozi
 claude plugin install rozi@rozi
 ```
 
-Then restart Claude Code in its panes. A plugin named `rozi` from any marketplace counts as
+The command is in the command palette only while the plugin is missing: the extension checks once
+each time it starts, and the command leaves the palette once it has installed the plugin. It still
+runs from `rozi run-action` either way. Then restart Claude Code in its panes. A plugin named `rozi` from any marketplace counts as
 installed, enabled or not, so a disabled one is not suggested again. Set `suggest_hooks = false`
 to never mention it.
 

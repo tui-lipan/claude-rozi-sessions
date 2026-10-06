@@ -33,6 +33,9 @@ EXTENSION_ID = "claude-rozi-sessions"
 COMMAND_TIMEOUT = 5.0
 # rozi's Claude Code plugin: its hooks report the live state of the conversation a client shows.
 HOOKS_PLUGIN = "rozi"
+# The palette command that installs it. Hidden by the manifest, and listed only while the plugin
+# is missing.
+INSTALL_HOOKS_COMMAND = "install-hooks"
 HOOKS_MARKETPLACE = "tui-lipan/rozi"
 HOOKS_NOTICE = (
     "For live status of the conversation on screen, install rozi's Claude Code hooks: run "
@@ -746,6 +749,13 @@ class Cli:
     def hooks_installed(self) -> bool:
         return has_hooks_plugin(self.run([self.settings.claude, "plugin", "list", "--json"]))
 
+    def offer_command(self, command: str, offered: bool) -> None:
+        """List or unlist one of this extension's commands in rozi's command palette."""
+        try:
+            self.run([ROZI, "show-command" if offered else "hide-command", command])
+        except SessionsError:
+            pass
+
     def stop(self, session: Session) -> None:
         self.run([self.settings.claude, "stop", session.short_id])
 
@@ -1014,7 +1024,11 @@ class SessionsService:
         self.hosts: dict[int, Host] = {}
         self.next_token = 1
         self.reported_error: str | None = None
+        # Whether rozi's hook plugin is installed, checked once a run; `None` until then, and when
+        # Claude cannot say.
+        self.hooks_present: bool | None = None
         self.hooks_checked = False
+        self.hooks_noticed = False
 
     def start_publisher(self, pane_id: int) -> Publisher:
         token = self.next_token
@@ -1103,20 +1117,27 @@ class SessionsService:
             follow_moved(memory, host, sessions, now)
             rows = host_rows(host, sessions, self.settings.scope, memory, label)
             self.publish(host.pane.pane_id, rows)
-        if hosts:
-            self.suggest_hooks()
+        self.offer_hooks(claude_in_use=bool(hosts))
 
-    def suggest_hooks(self) -> None:
-        """Once a run, when Claude is in use, point out rozi's hook plugin if it is missing."""
-        if self.hooks_checked or not self.settings.suggest_hooks:
-            return
-        self.hooks_checked = True
-        try:
-            installed = self.cli.hooks_installed()
-        except SessionsError:
-            # An older Claude without `plugin list --json`: nothing reliable to suggest.
-            return
-        if not installed:
+    def offer_hooks(self, claude_in_use: bool) -> None:
+        """Once a run, list the install command if rozi's hook plugin is missing, and point it out
+        the first time Claude is in use."""
+        if not self.hooks_checked:
+            self.hooks_checked = True
+            try:
+                self.hooks_present = self.cli.hooks_installed()
+            except SessionsError:
+                # An older Claude without `plugin list --json`: nothing reliable to offer.
+                self.hooks_present = None
+            if self.hooks_present is False:
+                self.cli.offer_command(INSTALL_HOOKS_COMMAND, True)
+        if (
+            claude_in_use
+            and self.hooks_present is False
+            and self.settings.suggest_hooks
+            and not self.hooks_noticed
+        ):
+            self.hooks_noticed = True
             self.cli.notify(HOOKS_NOTICE)
 
     def activate(self, pane_id: int, row_id: str) -> None:
