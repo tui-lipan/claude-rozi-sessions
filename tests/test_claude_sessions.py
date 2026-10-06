@@ -302,8 +302,10 @@ class ScreenTests(unittest.TestCase):
 class FakeCli:
     """Records every command the switch runs, against scripted screens and sessions."""
 
-    def __init__(self, listed, screens, after="", listed_after=None):
+    def __init__(self, listed, screens, after="", listed_after=None, repositories=None):
         self.listed = listed
+        # The Git repository of each directory, as `git rev-parse --git-common-dir` answers.
+        self.repositories = repositories or {}
         self.screens = list(screens)
         # What Claude shows, and lists, once Enter has been pressed.
         self.after = after if isinstance(after, list) else [after]
@@ -322,6 +324,9 @@ class FakeCli:
 
     def screen_text(self, pane_id):
         return self.after.pop(0) if len(self.after) > 1 else self.after[0]
+
+    def repository(self, path):
+        return self.repositories.get(path)
 
     def type_text(self, pane_id, value):
         self.calls.append(("type", value))
@@ -596,6 +601,49 @@ class SwitchTests(unittest.TestCase):
         cli = FakeCli(listed, screens, after=showing("shown"), listed_after=moved)
         self.assertFalse(self.run_switch(cli, host, "target-id"))
         self.assertIsNone(self.memory.last_target)
+
+    def test_a_session_of_another_repository_is_refused_before_anything_is_stopped(self) -> None:
+        for interactive in (False, True):
+            listed = sessions(
+                session("own", kind="interactive", pid=500),
+                session("shown-id", name="shown"),
+                session("elsewhere-id", name="other work", cwd="/home/x/tui-lipan"),
+            )
+            host = cs.Host(pane=pane(), interactive=listed[0] if interactive else None)
+            cli = FakeCli(
+                listed,
+                [prompt(label="shown")],
+                repositories={"/home/x/rozi": "/home/x/rozi/.git", "/home/x/tui-lipan": "/home/x/tui-lipan/.git"},
+            )
+            self.assertFalse(self.run_switch(cli, host, "elsewhere-id"))
+            self.assertEqual([call[0] for call in actions(cli)], ["notify"])
+            self.assertIn("outside this Claude's repository", actions(cli)[0][1])
+            self.assertIn("claude attach elsewher", actions(cli)[0][1])
+
+    def test_a_worktree_of_the_same_repository_is_switched_to(self) -> None:
+        worktree = "/home/x/rozi/.claude/worktrees/fix"
+        listed = sessions(
+            session("own", kind="interactive", pid=500), session("target-id", pid=9, cwd=worktree)
+        )
+        host = cs.Host(pane=pane(), interactive=listed[0])
+        cli = FakeCli(
+            listed,
+            [prompt(), prompt(typed="/resume target-id")],
+            after="● reply\n❯",
+            listed_after=sessions(session("forked", pid=8), session("target-id", pid=9, cwd=worktree)),
+            repositories={"/home/x/rozi": "/home/x/rozi/.git", worktree: "/home/x/rozi/.git"},
+        )
+        self.assertTrue(self.run_switch(cli, host, "target-id"))
+
+    def test_same_repository_rules(self) -> None:
+        repo = {"/r": "/r/.git", "/r/wt": "/r/.git", "/o": "/o/.git"}.get
+        self.assertTrue(cs.same_repository("/r", "/r/", repo))
+        self.assertTrue(cs.same_repository("/r", "/r/wt", repo))
+        self.assertFalse(cs.same_repository("/r", "/o", repo))
+        # Outside any repository only the very directory counts.
+        self.assertFalse(cs.same_repository("/plain", "/other", repo))
+        # An unknown directory does not block a switch.
+        self.assertTrue(cs.same_repository(None, "/o", repo))
 
     def test_selecting_the_row_on_screen_does_nothing(self) -> None:
         listed = sessions(session("own", kind="interactive", pid=500), session("bg"))

@@ -13,9 +13,10 @@ works in. The repository is a rozi extension: a manifest and one supervised Pyth
 
 ## Workflow rules
 
-- Use only public interfaces: `claude agents --json`, `claude stop`, `claude plugin`, Claude's
-  `/resume` command, and rozi's documented CLI (`list-panes`, `capture-pane`, `send-text`,
-  `send-keys`, `notify`, `publish`) and extension environment. Never read Claude's or rozi's private state files.
+- Use only public interfaces: `claude agents --json`, `claude stop`, `claude plugin`,
+  `git rev-parse`, Claude's `/resume` command, and rozi's documented CLI (`list-panes`,
+  `capture-pane`, `send-text`, `send-keys`, `notify`, `publish`) and extension environment. Never
+  read Claude's or rozi's private state files.
 - Never type into Claude's prompt unless the screen shows an empty prompt, no dialog, no session
   list, and no streaming turn. Read the typed command back before pressing Enter, and do anything
   irreversible (`claude stop`) only after that read-back succeeds.

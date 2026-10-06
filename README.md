@@ -127,6 +127,10 @@ The extension does not switch, and says why in a rozi notification, when:
 - Claude is showing its own session list, whose prompt starts a new session.
 - From an attached client, the selected session is still working. Stopping it would cut its turn
   short.
+- The selected session works in another repository than the Claude client. Claude's `/resume`
+  finds only the client's own repository's sessions, in its directory or another Git worktree of
+  the same repository, so the extension never stops or types anything for it. Open it with ← in
+  Claude, or with `claude attach <id>`.
 - It cannot tell which session an attached client shows, because no name matches exactly one row.
 - The selected session has ended.
 
@@ -178,6 +182,9 @@ directory. Use `cwd` when you run Claude clients in several panes for different 
   pane is recognised as a Claude client. Rows are not published.
 - **Remote panes.** rozi omits the foreground process group for a remote attachment, whose
   processes are on another machine, so those panes are left alone.
+- **Sessions of other repositories** are listed with `scope = "all"` but cannot be switched to from
+  this pane, because Claude resumes only its own repository's sessions. Use `scope = "cwd"` to
+  list only the pane's own.
 - **Switching between running sessions from an attached client** stops the selected session first.
   Claude offers no supported way to attach another running session from a client that is already
   attached, other than navigating its session list by hand with ←.
