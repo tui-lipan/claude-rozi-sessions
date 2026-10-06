@@ -2,9 +2,9 @@
 id = "claude-rozi-sessions"
 title = "Claude Code sessions"
 description = "One Activity row per Claude Code conversation, grouped by worktree; selecting a row switches Claude to it"
-version = "0.3.2"
+version = "0.4.0"
 api = 1
-min_rozi = "0.0.28"
+min_rozi = "0.0.29"
 homepage = "https://github.com/tui-lipan/claude-rozi-sessions"
 
 # Defaults. Override them in [extensions.claude-rozi-sessions] in config.toml.
@@ -27,6 +27,8 @@ suggest_hooks = true
 id = "install-hooks"
 label = "Install Claude Code hooks"
 exec = ["python", "{extension_dir}/bin/install_hooks.py"]
+# Listed in the command palette only while rozi's hook plugin is missing; the service decides.
+hidden = true
 
 [[services]]
 name = "watch"

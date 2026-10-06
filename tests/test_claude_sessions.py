@@ -328,6 +328,9 @@ class FakeCli:
     def repository(self, path):
         return self.repositories.get(path)
 
+    def offer_command(self, command, offered):
+        self.calls.append(("offer", command, offered))
+
     def type_text(self, pane_id, value):
         self.calls.append(("type", value))
 
@@ -931,6 +934,18 @@ class HooksTests(unittest.TestCase):
         self.assertEqual(notices, [("notify", cs.HOOKS_NOTICE)])
         self.assertEqual(cli.calls.count(("hooks_installed",)), 1)
 
+    def test_the_install_command_is_listed_only_while_the_plugin_is_missing(self) -> None:
+        for hosts in (True, False):
+            service, cli = self.service(installed=False, hosts=hosts)
+            service.poll()
+            service.poll()
+            offers = [call for call in cli.calls if call[0] == "offer"]
+            self.assertEqual(offers, [("offer", "install-hooks", True)])
+        for installed in (True, cs.SessionsError("unknown option '--json'")):
+            service, cli = self.service(installed=installed)
+            service.poll()
+            self.assertNotIn("offer", [call[0] for call in cli.calls])
+
     def test_nothing_is_suggested_when_it_is_installed_unwanted_or_unused(self) -> None:
         for service, cli in (
             self.service(installed=True),
@@ -972,6 +987,9 @@ class InstallerCli:
     def notify(self, message, *, error=False):
         self.calls.append(("notify", message, error))
 
+    def offer_command(self, command, offered):
+        self.calls.append(("offer", command, offered))
+
 
 class InstallerTests(unittest.TestCase):
     def test_install_adds_the_marketplace_then_the_plugin(self) -> None:
@@ -986,12 +1004,15 @@ class InstallerTests(unittest.TestCase):
         )
         self.assertIn("Restart Claude Code", cli.calls[-1][1])
         self.assertFalse(cli.calls[-1][2])
+        # Nothing left to offer: the command leaves the palette.
+        self.assertIn(("offer", "install-hooks", False), cli.calls)
 
     def test_an_installed_plugin_is_left_alone(self) -> None:
         cli = InstallerCli(installed=True)
         ih.install(cli)
-        self.assertEqual([call[0] for call in cli.calls], ["notify"])
-        self.assertIn("already installed", cli.calls[0][1])
+        self.assertEqual([call[0] for call in cli.calls], ["offer", "notify"])
+        self.assertEqual(cli.calls[0], ("offer", "install-hooks", False))
+        self.assertIn("already installed", cli.calls[1][1])
 
     def test_a_failure_is_reported_once_as_an_error(self) -> None:
         cli = InstallerCli(fail="install")
@@ -1000,6 +1021,8 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(len(notices), 1)
         self.assertIn("offline", notices[0][1])
         self.assertTrue(notices[0][2])
+        # Still missing, so still offered.
+        self.assertNotIn("offer", [call[0] for call in cli.calls])
 
 
 class SettingsTests(unittest.TestCase):
