@@ -195,8 +195,9 @@ directory. Use `cwd` when you run Claude clients in several panes for different 
   instead.
 - Switching reads Claude's screen. A future Claude release that redraws its prompt differently
   makes the extension refuse to switch rather than guess.
-- The service runs only while a rozi client with the extension is attached. Its errors go to a
-  stream rozi discards, so a missing `claude` shows up as no rows rather than as a message.
+- The service runs only while a rozi client with the extension is attached. With a rozi newer
+  than 0.0.29, it also exits on its own when that client is killed. Its errors go to a stream rozi
+  discards, so a missing `claude` shows up as no rows rather than as a message.
 
 ## Development
 
