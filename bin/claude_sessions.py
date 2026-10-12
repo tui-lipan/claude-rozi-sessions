@@ -192,6 +192,10 @@ class Session:
             # what rozi resumes the pane with.
             "native_session": conversation,
         }
+        if conversation != self.session_id:
+            # This process runs the conversation now, and its hooks report under its own id. rozi
+            # lets only a report naming it speak for the row, not the first process's last one.
+            row["live_session"] = self.session_id
         if reason:
             row["reason"] = reason
         if self.cwd:

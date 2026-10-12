@@ -790,6 +790,8 @@ class MovedConversationTests(unittest.TestCase):
         self.assertEqual([row["id"] for row in rows], ["early", "own"])
         # Claude keeps the transcript, and resumes it, under the first id.
         self.assertEqual([row["native_session"] for row in rows], ["early", "own"])
+        # Its hooks now report under the new id, which is the one that speaks for the row.
+        self.assertEqual([row.get("live_session") for row in rows], [None, "forked"])
         self.assertEqual([row["active"] for row in rows], [True, False])
 
     def test_selecting_the_moved_row_resumes_the_conversation_under_its_new_id(self) -> None:

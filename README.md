@@ -90,6 +90,11 @@ Claude runs no hooks in the pane when the client attaches to a background sessio
 last report goes stale. rozi keeps it out of the list once no row names its conversation, and
 restores the active row's conversation when the session is resurrected.
 
+A conversation the client sends to the background keeps its row and its `native_session`, which is
+the ID Claude resumes it by, but runs on under a new session ID. The row also carries that ID as
+`live_session`. The background process's hooks report under it, so with a rozi that reads
+`live_session` they drive the row, and the client's last report on the conversation no longer does.
+
 The plugin is optional, and this extension never installs it on its own: it changes Claude Code's
 setup for every session, inside rozi or not. When Claude is in use and the plugin is not installed,
 the extension says so in one notification per run. To install it, run **Install Claude Code
