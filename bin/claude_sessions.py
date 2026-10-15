@@ -1041,8 +1041,10 @@ class SessionsService:
         environment = os.environ.copy()
         # `ROZI_PANE` names the pane a publish stream belongs to.
         environment["ROZI_PANE"] = str(pane_id)
+        # `--kind agent`: each row is a Claude conversation, so rozi's Agents tab and picker list it
+        # with the other agents, not only among the Activity rows.
         process = subprocess.Popen(
-            [ROZI, "publish"],
+            [ROZI, "publish", "--kind", "agent"],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,

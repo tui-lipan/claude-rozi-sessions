@@ -18,7 +18,8 @@ Activity
 
 ## Requirements
 
-- rozi 0.0.29 or newer, for commands listed in the command palette only when they apply
+- rozi 0.0.30 or newer, for commands listed in the command palette only when they apply and for
+  the `agent` kind of published rows
 - Claude Code 2.1.285 or newer, for `claude agents --json` and `/resume` of a background session
 - Python 3 available as `python`
 - Linux or macOS. See [Limits](#limits).

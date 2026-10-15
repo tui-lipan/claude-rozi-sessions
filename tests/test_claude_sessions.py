@@ -7,6 +7,7 @@ import queue
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 SCRIPT = Path(__file__).parents[1] / "bin" / "claude_sessions.py"
@@ -891,6 +892,13 @@ class ServiceTests(unittest.TestCase):
         self.assertTrue(service.handle(("activate", 1, 2, "row")))
         self.assertEqual(seen, [(1, "row")])
         self.assertFalse(service.handle(("stop",)))
+
+    def test_the_stream_declares_its_rows_agents(self) -> None:
+        service = cs.SessionsService(cs.Settings(), cli=FakeCli([], []))
+        with mock.patch.object(cs.subprocess, "Popen") as popen:
+            popen.return_value.stdout = iter(())
+            service.start_publisher(7)
+        self.assertEqual(popen.call_args.args[0][1:], ["publish", "--kind", "agent"])
 
     def test_switching_can_be_turned_off(self) -> None:
         cli = FakeCli([], [])
