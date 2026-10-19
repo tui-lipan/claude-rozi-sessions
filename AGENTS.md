@@ -21,8 +21,8 @@ works in. The repository is a rozi extension: a manifest and one supervised Pyth
   list, and no streaming turn. Read the typed command back before pressing Enter, and do anything
   irreversible (`claude stop`) only after that read-back succeeds.
 - Keep the service standard-library Python 3 with no third-party dependencies.
-- An unrecognized Claude state must map to `working`, `idle`, `blocked`, or `done`; rozi reads any
-  other status word as a live run.
+- A published row status must be `working`, `idle`, `blocked`, `done`, or `error`; rozi reads
+  any other status word as a live run.
 - Keep `README.md` in sync with behavior, settings, and `min_rozi`.
 - Bump `version` in `extension.toml` with every change users install: patch for a fix, minor for a
   feature or setting. rozi offers an update whenever the remote moves, and labels one without a new

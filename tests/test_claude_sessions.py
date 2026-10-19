@@ -109,7 +109,7 @@ class SessionTests(unittest.TestCase):
             ("done", "Awaiting your reply"),
         )
         self.assertEqual(state("stopped"), ("idle", "Stopped"))
-        self.assertEqual(state("failed"), ("idle", "Session failed"))
+        self.assertEqual(state("failed"), ("error", "Session failed"))
         # An unknown word must not reach rozi, which would read it as a live run.
         self.assertEqual(state("pondering", "busy"), ("working", None))
         self.assertEqual(state("pondering"), ("idle", None))
@@ -127,6 +127,15 @@ class SessionTests(unittest.TestCase):
                 "cwd": "/w/fix",
             },
         )
+
+    def test_failed_sessions_publish_error_for_every_failure_state(self) -> None:
+        for state in ("failed", "error", "errored", "crashed"):
+            with self.subTest(state=state):
+                (failed,) = sessions(session("failed-session", state=state))
+                row = failed.row(active=False)
+                self.assertEqual(row["status"], "error")
+                self.assertEqual(row["reason"], "Session failed")
+                self.assertFalse(failed.is_working())
 
     def test_malformed_entries_are_skipped_and_garbage_is_an_error(self) -> None:
         self.assertEqual(cs.parse_sessions('[{"pid": 1}, 7, {"id": "a"}]')[0].session_id, "a")

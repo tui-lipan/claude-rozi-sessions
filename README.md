@@ -73,8 +73,10 @@ the background, keeps its row: its ID, its place, and the run history rozi keeps
 | `idle` | `idle` |
 | `stopped` | `idle`, reason "Stopped" |
 | Stopped by a switch, see [Switch sessions](#switch-sessions) | `done` after a finished turn, otherwise `idle`; reason "Stopped" |
-| `failed` | `idle`, reason "Session failed" |
+| `failed`, `error`, `errored`, or `crashed` | `error`, reason "Session failed" |
 | Anything else | `working` while Claude reports it busy, otherwise `idle` |
+
+Failure reporting requires a Rozi build that supports the `error` agent state.
 
 Claude also reports `blocked` once a turn has finished, when its reply ends with a question or
 asks you to choose, and for a session waiting for its first prompt. No dialog is open then, so the

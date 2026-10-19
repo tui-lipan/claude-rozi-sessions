@@ -168,7 +168,7 @@ class Session:
         if self.state == "blocked":
             return "done", "Awaiting your reply"
         if self.state in FAILED_STATES:
-            return "idle", "Session failed"
+            return "error", "Session failed"
         if self.state == "stopped":
             return "idle", "Stopped"
         if self.state in {"working", "done", "idle"}:
