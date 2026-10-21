@@ -198,9 +198,8 @@ directory. Use `cwd` when you run Claude clients in several panes for different 
   Claude offers no supported way to attach another running session from a client that is already
   attached, other than navigating its session list by hand with ←.
 - **The active row of an attached client** comes from the session name Claude draws above its
-  prompt. The
-  extension reads it every half second, so a switch made in Claude shows within about a second. Two sessions with the same name make it ambiguous; the last switch made here is used
-  instead.
+  prompt, read every half second, so a switch made in Claude shows within about a second. Two
+  sessions with the same name make it ambiguous; the last switch made here is used instead.
 - Switching reads Claude's screen. A future Claude release that redraws its prompt differently
   makes the extension refuse to switch rather than guess.
 - The service runs only while a rozi client with the extension is attached. With a rozi newer
