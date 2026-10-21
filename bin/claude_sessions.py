@@ -611,10 +611,6 @@ class Refusal:
 
 def switch_refusal(screen: Screen) -> Refusal | None:
     """Why typing into the client now could lose or misdirect something, if it could."""
-    if screen.agent_view:
-        return Refusal(
-            "Claude is showing its session list. Press Esc in Claude, then select the row again."
-        )
     if screen.composer is None:
         return Refusal(
             "Claude is showing a question or a dialog. Answer it, then select the row again."
@@ -681,6 +677,7 @@ def plan_switch(
     memory: HostMemory,
     active: str | None,
     repository: Callable[[str], str | None] = lambda path: None,
+    listing: bool = False,
 ) -> SwitchPlan | Refusal:
     by_id = {session.session_id: session for session in sessions}
     target = by_id.get(target_id) or memory.displaced.get(target_id)
@@ -701,7 +698,10 @@ def plan_switch(
     # stopped first, and it must be idle so no turn is cut short. The conversation on screen may
     # be working: Claude holds the command until its turn ends, then resumes in its place.
     current = by_id.get(active) if active else None
-    if current is None:
+    if current is None and listing:
+        # Claude's session list shows no conversation, so none is displaced.
+        pass
+    elif current is None:
         return Refusal(
             "Cannot tell which Claude session is on screen. Switch in Claude with ←, or attach "
             f"with `claude attach {target.short_id}`."
@@ -743,6 +743,10 @@ class Cli:
 
     def repository(self, path: str) -> str | None:
         """The Git repository `path` belongs to, shared by all of its worktrees, if any."""
+        # A worktree that has been cleaned up still names its repository through the nearest
+        # directory that remains.
+        while not os.path.isdir(path) and os.path.dirname(path) != path:
+            path = os.path.dirname(path)
         try:
             output = self.run(
                 ["git", "-C", path, "rev-parse", "--path-format=absolute", "--git-common-dir"]
@@ -837,7 +841,9 @@ def switch(
     if target_id == active:
         return True
     refusal = switch_refusal(screen)
-    plan = refusal or plan_switch(host, target_id, sessions, memory, active, cli.repository)
+    plan = refusal or plan_switch(
+        host, target_id, sessions, memory, active, cli.repository, screen.agent_view
+    )
     if isinstance(plan, Refusal):
         cli.notify(plan.message, error=True)
         return False

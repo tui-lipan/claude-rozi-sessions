@@ -5,6 +5,7 @@ import json
 import os
 import queue
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -276,7 +277,7 @@ class ScreenTests(unittest.TestCase):
         self.assertIsNone(screen.composer)
         self.assertIn("dialog", cs.switch_refusal(screen).message)
 
-    def test_claudes_session_list_is_never_typed_into(self) -> None:
+    def test_claudes_session_list_accepts_a_switch_command(self) -> None:
         listing = frame(
             "Your conversation moved to the background — enter opens it",
             RULE,
@@ -285,7 +286,7 @@ class ScreenTests(unittest.TestCase):
         )
         screen = cs.read_screen(listing)
         self.assertTrue(screen.agent_view)
-        self.assertIn("session list", cs.switch_refusal(screen).message)
+        self.assertIsNone(cs.switch_refusal(screen))
 
     def test_a_running_turn_does_not_stop_a_switch(self) -> None:
         # Claude holds a command sent mid-turn until the turn ends, so nothing is cut short.
@@ -1084,5 +1085,21 @@ class WatchHostTest(unittest.TestCase):
         self.assertTrue(messages.empty())
 
 
+class RepositoryTests(unittest.TestCase):
+    def test_a_removed_worktree_resolves_through_its_nearest_existing_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            asked = []
+
+            class Probe(cs.Cli):
+                def run(self, args, timeout=cs.COMMAND_TIMEOUT):
+                    asked.append(args[2])
+                    return "/repo/.git"
+
+            gone = os.path.join(root, ".claude", "worktrees", "fix")
+            Probe(cs.Settings()).repository(gone)
+            self.assertEqual(asked, [root])
+
+
 if __name__ == "__main__":
     unittest.main()
+

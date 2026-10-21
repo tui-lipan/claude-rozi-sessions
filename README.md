@@ -134,7 +134,6 @@ The extension does not switch, and says why in a rozi notification, when:
 
 - Claude's prompt holds unsent text. Claude's dim placeholder does not count.
 - Claude is showing a question, an approval dialog, or any screen without its prompt.
-- Claude is showing its own session list, whose prompt starts a new session.
 - From an attached client, the selected session is still working. Stopping it would cut its turn
   short.
 - The selected session works in another repository than the Claude client. Claude's `/resume`
