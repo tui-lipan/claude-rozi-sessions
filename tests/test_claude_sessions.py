@@ -910,6 +910,29 @@ class ServiceTests(unittest.TestCase):
             service.start_publisher(7)
         self.assertEqual(popen.call_args.args[0][1:], ["publish", "--kind", "agent"])
 
+    def test_a_new_label_on_an_attached_client_is_noticed(self) -> None:
+        class LabelCli:
+            label = "first"
+
+            def screen_text(self, pane_id: int) -> str:
+                return showing(self.label)
+
+        cli = LabelCli()
+        service = cs.SessionsService(cs.Settings(), cli=cli)
+        service.hosts[1] = cs.Host(pane=pane(), interactive=None)
+        self.assertFalse(service.label_changed())
+        self.assertFalse(service.label_changed())
+        cli.label = "second"
+        self.assertTrue(service.label_changed())
+        self.assertFalse(service.label_changed())
+
+    def test_a_client_running_its_own_conversation_is_not_read_between_polls(self) -> None:
+        cli = FakeCli([], [])
+        service = cs.SessionsService(cs.Settings(), cli=cli)
+        service.hosts[1] = cs.Host(pane=pane(), interactive=session("own"))
+        self.assertFalse(service.label_changed())
+        self.assertEqual(cli.calls, [])
+
     def test_switching_can_be_turned_off(self) -> None:
         cli = FakeCli([], [])
         service = cs.SessionsService(cs.Settings(switching=False), cli=cli)

@@ -32,6 +32,9 @@ from typing import Any, Callable
 ROZI = os.environ.get("ROZI_BIN", "rozi")
 EXTENSION_ID = "claude-rozi-sessions"
 COMMAND_TIMEOUT = 5.0
+# How often an attached client's screen is read between polls, so that a switch made in Claude
+# shows up at once.
+LABEL_INTERVAL = 0.5
 # rozi's Claude Code plugin: its hooks report the live state of the conversation a client shows.
 HOOKS_PLUGIN = "rozi"
 # The palette command that installs it. Hidden by the manifest, and listed only while the plugin
@@ -1033,6 +1036,8 @@ class SessionsService:
         self.publishers: dict[int, Publisher] = {}
         self.memory: dict[int, HostMemory] = {}
         self.hosts: dict[int, Host] = {}
+        # The session name each attached client showed when last read, to notice a switch.
+        self.labels: dict[int, str | None] = {}
         self.next_token = 1
         self.reported_error: str | None = None
         # Whether rozi's hook plugin is installed, checked once a run; `None` until then, and when
@@ -1191,6 +1196,28 @@ class SessionsService:
                 self.activate(pane_id, str(row_id))  # type: ignore[arg-type]
         return True
 
+    def label_changed(self) -> bool:
+        """Whether an attached client now names another session above its prompt than at the last
+        look.
+
+        Claude lists a session in `claude agents --json` only moments after the client opens it, but
+        the client names it at once. A client running its own conversation shows no label, and is
+        left to the poll."""
+        labels: dict[int, str | None] = {}
+        for pane_id, host in self.hosts.items():
+            if host.interactive is not None:
+                continue
+            try:
+                labels[pane_id] = text_label(self.cli.screen_text(pane_id))
+            except SessionsError:
+                labels[pane_id] = self.labels.get(pane_id)
+        changed = any(
+            pane_id in self.labels and label != self.labels[pane_id]
+            for pane_id, label in labels.items()
+        )
+        self.labels = labels
+        return changed
+
     def run(self) -> int:
         while True:
             try:
@@ -1201,9 +1228,11 @@ class SessionsService:
             deadline = time.monotonic() + self.settings.poll_seconds
             while (remaining := deadline - time.monotonic()) > 0:
                 try:
-                    message = self.messages.get(timeout=remaining)
+                    message = self.messages.get(timeout=min(remaining, LABEL_INTERVAL))
                 except queue.Empty:
-                    break
+                    if self.label_changed():
+                        break
+                    continue
                 if not self.handle(message):
                     return 0
 
