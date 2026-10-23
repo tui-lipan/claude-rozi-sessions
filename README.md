@@ -55,9 +55,17 @@ foreground process group. The client is in one of two modes:
   it runs no conversation of its own. The active row is the session whose name Claude shows above
   its prompt, or the last one this extension switched to.
 
-Every background session is listed too, each with the directory it works in, so rozi groups it by
+Background sessions are listed too, each with the directory it works in, so rozi groups it by
 that directory's project and branch. Interactive sessions in other terminals are listed where they
 run, not here.
+
+With Claude clients in several panes, each background session is listed in one of them only:
+
+1. The pane attached to it.
+2. Otherwise the pane whose own conversation went to the background as that session.
+3. Otherwise the pane it was last listed in, while that pane still runs Claude.
+4. Otherwise the Claude pane working nearest above the session's directory, the lowest pane number
+   on a tie. With `scope = "all"`, a session no pane's directory contains goes to the lowest pane.
 
 Rows are ordered by when each conversation started, the client's own included, and a row keeps the
 place it was first published in. rozi names a pane's rows by position (`Claude Code #2`), so
@@ -180,10 +188,10 @@ switching = true    # false: never type into Claude
 suggest_hooks = true  # false: never suggest rozi's Claude Code plugin
 ```
 
-With `scope = "all"`, the pane lists every background session on the machine, like Claude's own
-session list. With `scope = "cwd"`, it lists only sessions started in or below the pane's
-directory. Use `cwd` when you run Claude clients in several panes for different projects; with
-`all`, each of those panes lists every session.
+With `scope = "all"`, every background session on the machine is listed in some Claude pane, like
+Claude's own session list. With `scope = "cwd"`, a session no pane is attached to or has sent to
+the background is listed only in a pane whose directory contains it. Use `cwd` when you run Claude
+clients in several panes for different projects.
 
 ## Limits
 

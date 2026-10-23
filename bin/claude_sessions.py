@@ -487,22 +487,98 @@ def follow_moved(memory: HostMemory, host: Host, sessions: list[Session], now_ms
             del memory.moved[session_id]
 
 
+def shown_session(
+    host: Host, sessions: list[Session], memory: HostMemory, label: str | None
+) -> str | None:
+    """The conversation the client has on screen, among every one it could switch to."""
+    listed = listed_sessions(host, sessions, "all") + list(memory.displaced.values())
+    return active_session(host, listed, label, memory.last_target)
+
+
+def assign_owners(
+    hosts: list[Host],
+    sessions: list[Session],
+    shown: dict[int, str | None],
+    memories: dict[int, HostMemory],
+    owners: dict[str, int],
+    scope: str,
+) -> dict[str, int]:
+    """The one host pane each background session is listed in.
+
+    Every client could list every background session, so a session listed by each pane it could
+    belong to would appear once per pane. A session belongs to the pane attached to it, then to
+    the pane whose own conversation moved into it, then to the pane it last belonged to, so it
+    stays put after the client moves on. A session no pane has claimed yet goes to the pane
+    working nearest above its directory, the lowest pane on a tie; with `scope = "all"`, to the
+    lowest pane when none contains it.
+    """
+    panes = sorted(host.pane.pane_id for host in hosts)
+    by_pane = {host.pane.pane_id: host for host in hosts}
+    assigned = {}
+    for session in sessions:
+        if session.kind != "background":
+            continue
+        session_id = session.session_id
+        owner = next((pane_id for pane_id in panes if shown.get(pane_id) == session_id), None)
+        if owner is None:
+            owner = next(
+                (
+                    pane_id
+                    for pane_id in panes
+                    if session_id in memories.get(pane_id, HostMemory()).moved
+                ),
+                None,
+            )
+        if owner is None and owners.get(session_id) in by_pane:
+            owner = owners[session_id]
+        if owner is None:
+            owner = nearest_pane(session, hosts, scope)
+        if owner is not None:
+            assigned[session_id] = owner
+    return assigned
+
+
+def nearest_pane(session: Session, hosts: list[Host], scope: str) -> int | None:
+    containing = [host for host in hosts if is_under(session.cwd, host.pane.cwd)]
+    if containing:
+        nearest = min(
+            containing,
+            key=lambda host: (-len(os.path.normpath(host.pane.cwd or "")), host.pane.pane_id),
+        )
+        return nearest.pane.pane_id
+    if scope == "all" and hosts:
+        return min(host.pane.pane_id for host in hosts)
+    return None
+
+
 def host_rows(
     host: Host,
     sessions: list[Session],
     scope: str,
     memory: HostMemory,
     label: str | None,
+    owners: dict[str, int] | None = None,
 ) -> list[dict[str, object]]:
     """The rows a host pane publishes, or none when it has nothing a single row could not say.
 
     A client running only its own conversation is one agent, which rozi already shows; the hooks
     or screen detection speak for it better than a two-second poll.
 
+    With `owners`, from `assign_owners`, the pane lists only the background sessions it owns, and
+    the owners already say which sessions the scope leaves out.
+
     Rows are ordered by when each conversation started, wherever it runs now, so switching never
     renumbers them: rozi names a pane's rows by position.
     """
-    listed = listed_sessions(host, sessions, scope)
+    if owners is None:
+        listed = listed_sessions(host, sessions, scope)
+    else:
+        listed = [
+            session
+            for session in listed_sessions(host, sessions, "all")
+            if session.kind != "background"
+            or owners.get(session.session_id) == host.pane.pane_id
+        ]
     running = {session.session_id for session in listed}
     for session_id, session in list(memory.displaced.items()):
         # Running again, under its own id or, once resumed, under the conversation's first one.
@@ -839,8 +915,7 @@ def switch(
         return False
     sessions = cli.sessions()
     screen = cli.screen(pane_id)
-    listed = listed_sessions(host, sessions, "all") + list(memory.displaced.values())
-    active = active_session(host, listed, screen.label, memory.last_target)
+    active = shown_session(host, sessions, memory, screen.label)
     if target_id == active:
         return True
     refusal = switch_refusal(screen)
@@ -1035,6 +1110,8 @@ class SessionsService:
         self.messages: queue.Queue[tuple[object, ...]] = queue.Queue()
         self.publishers: dict[int, Publisher] = {}
         self.memory: dict[int, HostMemory] = {}
+        # The pane each background session is listed in, kept between polls; see `assign_owners`.
+        self.owners: dict[str, int] = {}
         self.hosts: dict[int, Host] = {}
         # The session name each attached client showed when last read, to notice a switch.
         self.labels: dict[int, str | None] = {}
@@ -1118,6 +1195,7 @@ class SessionsService:
             self.stop_publisher(pane_id)
         for pane_id in set(self.memory) - set(hosts):
             del self.memory[pane_id]
+        labels: dict[int, str | None] = {}
         for host in hosts.values():
             memory = self.memory.setdefault(host.pane.pane_id, HostMemory())
             label = None
@@ -1126,6 +1204,7 @@ class SessionsService:
                     label = text_label(self.cli.screen_text(host.pane.pane_id))
                 except SessionsError:
                     label = None
+            labels[host.pane.pane_id] = label
             now = int(time.time() * 1000)
             if memory.pending is not None:
                 try:
@@ -1133,8 +1212,19 @@ class SessionsService:
                 except SessionsError:
                     pass
             follow_moved(memory, host, sessions, now)
-            rows = host_rows(host, sessions, self.settings.scope, memory, label)
-            self.publish(host.pane.pane_id, rows)
+        shown = {
+            pane_id: shown_session(host, sessions, self.memory[pane_id], labels[pane_id])
+            for pane_id, host in hosts.items()
+        }
+        self.owners = assign_owners(
+            list(hosts.values()), sessions, shown, self.memory, self.owners, self.settings.scope
+        )
+        for pane_id, host in hosts.items():
+            rows = host_rows(
+                host, sessions, self.settings.scope, self.memory[pane_id], labels[pane_id],
+                self.owners,
+            )
+            self.publish(pane_id, rows)
         self.offer_hooks(claude_in_use=bool(hosts))
 
     def offer_hooks(self, claude_in_use: bool) -> None:

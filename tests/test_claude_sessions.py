@@ -251,6 +251,95 @@ class RowTests(unittest.TestCase):
         self.assertFalse(cs.is_under("/home/x/rozi-old", "/home/x/rozi"))
 
 
+def host_pane(pane_id: int, pid: int | None = None, cwd: str = "/home/x/rozi"):
+    return cs.Pane(pane_id=pane_id, cwd=cwd, program="claude", agent=None,
+                   foreground_pid=pid if pid is not None else 500 + pane_id)
+
+
+def owned_rows(hosts, listed, *, shown=None, memories=None, owners=None, scope="all"):
+    """Each pane's published row ids once the background sessions have their owners."""
+    memories = memories or {}
+    owners = cs.assign_owners(hosts, listed, shown or {}, memories, owners or {}, scope)
+    return owners, {
+        host.pane.pane_id: [
+            row["id"]
+            for row in cs.host_rows(host, listed, scope,
+                                    memories.get(host.pane.pane_id, cs.HostMemory()), None, owners)
+        ]
+        for host in hosts
+    }
+
+
+class OwnershipTests(unittest.TestCase):
+    """Every client could list every background session; each is listed in one pane only, or
+    rozi shows it once per pane."""
+
+    def test_a_background_session_is_listed_by_one_client(self) -> None:
+        listed = sessions(
+            session("bg", started=1),
+            session("one", kind="interactive", pid=501, started=2),
+            session("two", kind="interactive", pid=502, started=3),
+            session("three", kind="interactive", pid=503, started=4),
+        )
+        hosts = cs.classify([host_pane(1), host_pane(2), host_pane(3)], listed,
+                            group_of=lambda pid: pid)
+        _, rows = owned_rows(hosts, listed)
+        self.assertEqual(rows, {1: ["bg", "one"], 2: [], 3: []})
+
+    def test_the_client_attached_to_a_session_lists_it(self) -> None:
+        listed = sessions(session("bg", name="docs"), session("other", name="other"),
+                          session("one", kind="interactive", pid=501))
+        hosts = cs.classify([host_pane(1), host_pane(2)], listed, group_of=lambda pid: pid)
+        owners, rows = owned_rows(hosts, listed, shown={1: "one", 2: "bg"})
+        self.assertEqual(owners, {"bg": 2, "other": 1})
+        self.assertEqual(rows, {1: ["one", "other"], 2: ["bg"]})
+
+    def test_a_conversation_sent_to_the_background_stays_with_its_client(self) -> None:
+        listed = sessions(session("moved"), session("own2", kind="interactive", pid=502))
+        hosts = cs.classify([host_pane(1), host_pane(2)], listed, group_of=lambda pid: pid)
+        (origin,) = sessions(session("first"))
+        memories = {2: cs.HostMemory(moved={"moved": origin})}
+        owners, _ = owned_rows(hosts, listed, memories=memories)
+        self.assertEqual(owners["moved"], 2)
+
+    def test_a_session_stays_with_its_pane_after_the_client_moves_on(self) -> None:
+        listed = sessions(session("bg"), session("one", kind="interactive", pid=501))
+        hosts = cs.classify([host_pane(1), host_pane(2)], listed, group_of=lambda pid: pid)
+        owners, _ = owned_rows(hosts, listed, owners={"bg": 2})
+        self.assertEqual(owners["bg"], 2)
+        # Its pane closed: exactly one other takes it over.
+        owners, _ = owned_rows(hosts[:1], listed, owners={"bg": 3})
+        self.assertEqual(owners["bg"], 1)
+
+    def test_a_session_goes_to_the_pane_nearest_above_it(self) -> None:
+        listed = sessions(session("deep", cwd="/home/x/rozi/tree"), session("far", cwd="/srv"))
+        hosts = [cs.Host(host_pane(1, cwd="/home/x"), None),
+                 cs.Host(host_pane(2, cwd="/home/x/rozi"), None)]
+        owners, _ = owned_rows(hosts, listed)
+        self.assertEqual((owners["deep"], owners["far"]), (2, 1))
+        owners, _ = owned_rows(hosts, listed, scope="cwd")
+        self.assertEqual(owners, {"deep": 2})
+
+    def test_a_poll_publishes_each_background_session_once(self) -> None:
+        listed = sessions(
+            session("bg", started=1),
+            session("one", kind="interactive", pid=501, started=2),
+            session("two", kind="interactive", pid=502, started=3),
+        )
+
+        class PollCli(FakeCli):
+            def panes(self):
+                return [host_pane(1), host_pane(2)]
+
+        service = cs.SessionsService(cs.Settings(), cli=PollCli(listed, []))
+        service.hooks_checked, service.hooks_present = True, True
+        published = {}
+        service.publish = lambda pane_id, rows: published.__setitem__(
+            pane_id, [row["id"] for row in rows])
+        service.poll()
+        self.assertEqual(published, {1: ["bg", "one"], 2: []})
+
+
 class ScreenTests(unittest.TestCase):
     def test_a_placeholder_is_not_a_draft(self) -> None:
         screen = cs.read_screen(prompt())
