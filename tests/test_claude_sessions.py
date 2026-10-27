@@ -4,8 +4,10 @@ import importlib.util
 import json
 import os
 import queue
+import stat
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -1043,6 +1045,67 @@ class ServiceTests(unittest.TestCase):
         service.hosts[1] = cs.Host(pane=pane(), interactive=None)
         service.activate(1, "row")
         self.assertEqual([call[0] for call in cli.calls], ["notify"])
+
+
+class ClientWatchTests(unittest.TestCase):
+    """Polling again as soon as a Claude client starts or exits, from rozi's `foreground-changed`."""
+
+    @staticmethod
+    def event(program: str, previous: str = "") -> str:
+        data = {"pane": "3", "program": program, "previous_program": previous, "pid": ""}
+        return json.dumps({"event": "foreground-changed", "data": data})
+
+    @staticmethod
+    def agent(agent: str, state: str, previous: str) -> str:
+        data = {"pane": "3", "agent": agent, "state": state, "previous_state": previous}
+        return json.dumps({"event": "agent-state-changed", "data": data})
+
+    def test_a_claude_agent_appearing_or_going_counts_but_not_its_turns(self) -> None:
+        self.assertTrue(cs.client_changed(self.agent("claude", "idle", "")))
+        self.assertTrue(cs.client_changed(self.agent("claude", "", "working")))
+        self.assertFalse(cs.client_changed(self.agent("claude", "idle", "working")))
+        self.assertFalse(cs.client_changed(self.agent("codex", "idle", "")))
+
+    def test_only_a_claude_client_starting_or_exiting_counts(self) -> None:
+        self.assertTrue(cs.client_changed(self.event("claude")))
+        self.assertTrue(cs.client_changed(self.event("", previous="claude")))
+        self.assertTrue(cs.client_changed(self.event("Claude-Code")))
+        self.assertFalse(cs.client_changed(self.event("cargo", previous="ls")))
+        self.assertFalse(cs.client_changed("not json"))
+        self.assertFalse(cs.client_changed(json.dumps({"event": "foreground-changed"})))
+
+    def test_a_client_change_polls_again_at_once(self) -> None:
+        service = cs.SessionsService(cs.Settings(poll_seconds=60), cli=FakeCli([], []))
+        polls = []
+        service.poll = lambda: polls.append(time.monotonic())
+        service.messages.put(("client",))
+        service.messages.put(("stop",))
+        started = time.monotonic()
+        self.assertEqual(service.run(), 0)
+        self.assertEqual(len(polls), 2, "the change ends the wait for the next poll")
+        self.assertLess(time.monotonic() - started, 5)
+
+    @unittest.skipIf(os.name == "nt", "the stand-in rozi is a POSIX shell script")
+    def test_the_stream_queues_a_poll_and_a_refusal_leaves_the_poll_alone(self) -> None:
+        def watch(script: str) -> tuple[list[tuple[object, ...]], str]:
+            with tempfile.TemporaryDirectory() as directory:
+                args = Path(directory) / "args"
+                rozi = Path(directory) / "rozi"
+                rozi.write_text(f'#!/bin/sh\necho "$@" > "{args}"\n{script}\n', encoding="utf-8")
+                rozi.chmod(rozi.stat().st_mode | stat.S_IXUSR)
+                messages: queue.Queue[tuple[object, ...]] = queue.Queue()
+                with mock.patch.object(cs, "ROZI", str(rozi)):
+                    cs.watch_clients(messages).join(timeout=5)
+                return list(messages.queue), args.read_text().strip()
+
+        streamed = "\n".join(
+            f"echo '{line}'" for line in (self.event("cargo"), self.event("claude"))
+        )
+        queued, args = watch(streamed)
+        self.assertEqual(args, "subscribe foreground-changed agent-state-changed")
+        self.assertEqual(queued, [("client",)])
+        refused, _ = watch("echo 'unknown event' >&2; exit 1")
+        self.assertEqual(refused, [])
 
 
 class HooksTests(unittest.TestCase):

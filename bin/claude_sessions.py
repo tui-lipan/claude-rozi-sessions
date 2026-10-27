@@ -55,6 +55,8 @@ VERIFY_INTERVAL = 0.2
 # How long after a client's own conversation leaves it to wait for Claude to list that
 # conversation again as a background session, under its new id.
 MOVE_WINDOW_MS = 30_000
+# Foreground programs that are a Claude Code client.
+CLIENT_PROGRAMS = {"claude", "claude-code"}
 # Anything unrecognized falls back on its coarse busy/idle `status`, never on a custom word, which
 # rozi would read as a live run.
 FAILED_STATES = {"failed", "error", "errored", "crashed"}
@@ -244,10 +246,7 @@ class Pane:
         )
 
     def runs_claude(self) -> bool:
-        return self.agent == "claude" or (self.program or "").casefold() in {
-            "claude",
-            "claude-code",
-        }
+        return self.agent == "claude" or (self.program or "").casefold() in CLIENT_PROGRAMS
 
 
 @dataclass(frozen=True)
@@ -1337,6 +1336,8 @@ class SessionsService:
                     continue
                 if not self.handle(message):
                     return 0
+                if message[0] == "client":
+                    break
 
     def close(self) -> None:
         for pane_id in list(self.publishers):
@@ -1352,6 +1353,58 @@ def activation(line: str) -> str | None:
     if not isinstance(value, dict):
         return None
     return text(value.get("activate"))
+
+
+def client_changed(line: str) -> bool:
+    """Whether one rozi event is a Claude client starting or exiting in a pane.
+
+    A pane is a client by its program or by rozi detecting Claude in it (see `Pane.runs_claude`),
+    so both count: the program starting or exiting, and a Claude agent appearing or going. A Claude
+    agent changing state does not change which panes are clients.
+    """
+    try:
+        event = json.loads(line)
+    except json.JSONDecodeError:
+        return False
+    if not isinstance(event, dict) or not isinstance(data := event.get("data"), dict):
+        return False
+    if event.get("event") == "agent-state-changed":
+        return text(data.get("agent")) == "claude" and not (
+            text(data.get("state")) and text(data.get("previous_state"))
+        )
+    return any(
+        (text(data.get(field)) or "").casefold() in CLIENT_PROGRAMS
+        for field in ("program", "previous_program")
+    )
+
+
+def watch_clients(messages: "queue.Queue[tuple[object, ...]]") -> threading.Thread:
+    """Queue a poll as soon as a Claude client starts or exits in a pane, so its rows come and go
+    at once instead of at the next poll.
+
+    A rozi without these events refuses the stream, and the poll alone remains.
+    Claude's own session list changes without any rozi event, so the poll stays either way.
+    """
+
+    def read() -> None:
+        try:
+            with subprocess.Popen(
+                [ROZI, "subscribe", "foreground-changed", "agent-state-changed"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+            ) as stream:
+                assert stream.stdout is not None
+                for line in stream.stdout:
+                    if client_changed(line):
+                        messages.put(("client",))
+        except OSError:
+            pass
+
+    thread = threading.Thread(target=read, name="clients", daemon=True)
+    thread.start()
+    return thread
 
 
 def watch_host(messages: "queue.Queue[tuple[object, ...]]", fd: int = 0) -> bool:
@@ -1392,6 +1445,7 @@ def main() -> int:
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
     watch_host(service.messages)
+    watch_clients(service.messages)
     try:
         return service.run()
     finally:

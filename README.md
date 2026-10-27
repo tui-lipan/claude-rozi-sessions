@@ -45,7 +45,8 @@ the command palette.
 ## What is listed
 
 The supervised `claude-rozi-sessions.watch` service polls `claude agents --json` and
-`rozi list-panes`. A pane is a Claude client when Claude Code runs in it and rozi can read its
+`rozi list-panes`, and polls again at once when a Claude client starts or exits in a pane, on a
+rozi that reports `foreground-changed` and `agent-state-changed`. A pane is a Claude client when Claude Code runs in it and rozi can read its
 foreground process group. The client is in one of two modes:
 
 - **Running its own conversation.** Claude lists that conversation as an interactive session whose
