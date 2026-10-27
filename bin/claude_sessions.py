@@ -58,6 +58,8 @@ MOVE_WINDOW_MS = 30_000
 # Anything unrecognized falls back on its coarse busy/idle `status`, never on a custom word, which
 # rozi would read as a live run.
 FAILED_STATES = {"failed", "error", "errored", "crashed"}
+# What a row says for a session Claude has not titled yet.
+NEW_SESSION = "New session"
 # Shown by Claude in place of a conversation's prompt: its list of every session, whose prompt
 # starts a *new* session. Typing a command there would create one.
 AGENT_VIEW_MARKERS = (
@@ -137,6 +139,9 @@ class Session:
     started_at: int
     # Stopped by this service to make way for another conversation, so Claude no longer lists it.
     stopped: bool = False
+    # Claude names a session after its own ID until it titles it, which it does after the first
+    # prompt.
+    untitled: bool = False
 
     @classmethod
     def from_wire(cls, value: object) -> Session | None:
@@ -145,17 +150,21 @@ class Session:
         session_id = text(value.get("sessionId")) or text(value.get("id"))
         if session_id is None:
             return None
+        short_id = text(value.get("id")) or session_id[:8]
+        name = text(value.get("name"))
+        untitled = name in {short_id, session_id}
         return cls(
             session_id=session_id,
-            short_id=text(value.get("id")) or session_id[:8],
+            short_id=short_id,
             pid=integer(value.get("pid")),
             kind=(text(value.get("kind")) or "").casefold(),
             cwd=text(value.get("cwd")),
-            name=text(value.get("name")),
+            name=None if untitled else name,
             state=(text(value.get("state")) or "").casefold(),
             status=(text(value.get("status")) or "").casefold(),
             waiting_for=text(value.get("waitingFor")),
             started_at=integer(value.get("startedAt")) or 0,
+            untitled=untitled,
         )
 
     def row_state(self) -> tuple[str, str | None]:
@@ -168,6 +177,9 @@ class Session:
         # finished turn's reply reads as a question; that turn is over, and nothing is stuck.
         if self.status == "waiting":
             return "blocked", (self.waiting_for or "").capitalize() or None
+        # A session Claude has not titled has had no prompt yet, and `blocked` means it waits for one.
+        if self.state == "blocked" and self.untitled:
+            return "idle", None
         if self.state == "blocked":
             return "done", "Awaiting your reply"
         if self.state in FAILED_STATES:
@@ -188,7 +200,7 @@ class Session:
         conversation = conversation or self.session_id
         row: dict[str, object] = {
             "id": conversation,
-            "title": self.name or "",
+            "title": self.name or (NEW_SESSION if self.untitled else ""),
             "status": status,
             "active": active,
             # Ties the row to the conversation Claude's own hooks report on, if they run, and is

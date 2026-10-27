@@ -77,6 +77,7 @@ the background, keeps its row: its ID, its place, and the run history rozi keeps
 | `status` `waiting`: a permission prompt, question, or other dialog is open | `blocked`, with Claude's reason, such as "Permission prompt" |
 | `working` | `working` |
 | `blocked` with no dialog open | `done`, reason "Awaiting your reply" |
+| `blocked`, for a session waiting for its first prompt | `idle`, titled "New session" |
 | `done` | `done` |
 | `idle` | `idle` |
 | `stopped` | `idle`, reason "Stopped" |
@@ -89,7 +90,8 @@ Failure reporting requires a Rozi build that supports the `error` agent state.
 Claude also reports `blocked` once a turn has finished, when its reply ends with a question or
 asks you to choose, and for a session waiting for its first prompt. No dialog is open then, so the
 row shows the turn as `done` and keeps `blocked` for a session that cannot continue until you
-answer it.
+answer it. A session waiting for its first prompt still carries its ID as its name, since Claude
+titles a session after that prompt, so its row is an `idle` "New session" instead.
 
 ### With rozi's Claude Code plugin
 

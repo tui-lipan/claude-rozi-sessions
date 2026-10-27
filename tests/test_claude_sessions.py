@@ -111,9 +111,24 @@ class SessionTests(unittest.TestCase):
         )
         self.assertEqual(state("stopped"), ("idle", "Stopped"))
         self.assertEqual(state("failed"), ("error", "Session failed"))
+        # Waiting for its first prompt: Claude names it after its own ID until then.
+        self.assertEqual(state("blocked", id="s", name="s"), ("idle", None))
+        self.assertEqual(state("blocked", "waiting", id="s", name="s"), ("blocked", None))
         # An unknown word must not reach rozi, which would read it as a live run.
         self.assertEqual(state("pondering", "busy"), ("working", None))
         self.assertEqual(state("pondering"), ("idle", None))
+
+    def test_a_session_waiting_for_its_first_prompt_is_a_new_idle_session(self) -> None:
+        (fresh,) = sessions(session("b63210ff-a0f2", name="b63210ff", state="blocked"))
+        self.assertTrue(fresh.untitled)
+        self.assertIsNone(fresh.name)
+        row = fresh.row(False)
+        self.assertEqual((row["title"], row["status"], row.get("reason")),
+                         ("New session", "idle", None))
+        # Once titled, the same session reads as any other.
+        (titled,) = sessions(session("b63210ff-a0f2", name="fix login", state="blocked"))
+        self.assertEqual((titled.row(False)["title"], titled.row_state()),
+                         ("fix login", ("done", "Awaiting your reply")))
 
     def test_a_row_names_its_conversation_and_where_it_works(self) -> None:
         (one,) = sessions(session("ec65255f-ce6d", name="remote install", cwd="/w/fix"))
