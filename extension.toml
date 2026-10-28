@@ -2,10 +2,11 @@
 id = "claude-rozi-sessions"
 title = "Claude Code sessions"
 description = "One Activity row per Claude Code conversation, grouped by worktree; selecting a row switches Claude to it"
-version = "0.5.0"
+version = "0.5.1"
 api = 1
-min_rozi = "0.0.30"
+min_rozi = "0.0.36"
 homepage = "https://github.com/tui-lipan/claude-rozi-sessions"
+screenshots = ["docs/screenshot.webp"]
 
 # Defaults. Override them in [extensions.claude-rozi-sessions] in config.toml.
 [settings]

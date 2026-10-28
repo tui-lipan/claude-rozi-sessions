@@ -6,20 +6,11 @@ lists every conversation as its own row in that pane, so rozi's Activity sidebar
 show each one's state under the repository and branch it works in. Selecting a row switches the
 client to that conversation.
 
-```text
-Activity
- rozi                                  master
- ⠋  Claude #1   worktree unlock
- rozi                     worktree-fix-login
- !  Claude #2   fix login redirect
- tui-lipan                              main
- ✓  Claude #3   focused_node_id docs
-```
+![rozi's Activity sidebar listing Claude Code conversations by repository and branch](docs/screenshot.webp)
 
 ## Requirements
 
-- rozi 0.0.30 or newer, for commands listed in the command palette only when they apply and for
-  the `agent` kind of published rows
+- rozi 0.0.36 or newer
 - Claude Code 2.1.285 or newer, for `claude agents --json` and `/resume` of a background session
 - Python 3 available as `python`
 - Linux or macOS. See [Limits](#limits).
