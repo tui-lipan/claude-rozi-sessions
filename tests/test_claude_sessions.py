@@ -229,6 +229,40 @@ class RowTests(unittest.TestCase):
         rows = cs.host_rows(host, listed, "all", memory, "same")
         self.assertEqual([row["active"] for row in rows], [False, False])
 
+    def test_a_running_turn_tells_sessions_sharing_the_label_apart(self) -> None:
+        idle = session("aaa", name="same")
+        busy = session("bbb", name="same", state="working", status="busy")
+        host = cs.Host(pane=pane(), interactive=None)
+        memory = cs.HostMemory(working=True)
+        rows = cs.host_rows(host, sessions(idle, busy), "all", memory, "same")
+        self.assertEqual([row["active"] for row in rows], [False, True])
+        # Its turn ended and the screen stopped saying: both sessions are idle now, and the one
+        # last told apart stays on screen.
+        memory.working = False
+        rows = cs.host_rows(host, sessions(idle, session("bbb", name="same")), "all", memory, "same")
+        self.assertEqual([row["active"] for row in rows], [False, True])
+        # The other one running in the background while the client's screen sits idle.
+        fresh = cs.HostMemory(working=False)
+        other = session("aaa", name="same", state="working", status="busy")
+        rows = cs.host_rows(host, sessions(other, session("bbb", name="same")), "all", fresh, "same")
+        self.assertEqual([row["active"] for row in rows], [False, True])
+        # Both running, or an unread screen, says nothing; the last switch still outranks it.
+        both = sessions(other, busy)
+        rows = cs.host_rows(host, both, "all", cs.HostMemory(working=True), "same")
+        self.assertEqual([row["active"] for row in rows], [False, False])
+        rows = cs.host_rows(host, sessions(idle, busy), "all", cs.HostMemory(), "same")
+        self.assertEqual([row["active"] for row in rows], [False, False])
+        switched = cs.HostMemory(working=True, last_target="aaa")
+        rows = cs.host_rows(host, sessions(idle, busy), "all", switched, "same")
+        self.assertEqual([row["active"] for row in rows], [True, False])
+
+    def test_the_screen_says_whether_a_turn_runs(self) -> None:
+        live = "✻ Channeling… (3m 6s · ↓ 9.3k tokens)\n" + f"{RULE} same ─\n❯\n{RULE}\n"
+        self.assertTrue(cs.text_working(live + "  ⏵⏵ bypass permissions on · esc to interrupt"))
+        self.assertTrue(cs.text_working(live + "  ⏵⏵ auto mode on (shift+tab to cycle)"))
+        done = "✻ Cooked for 14s · done 12:15 PM\n" + f"{RULE} same ─\n❯\n{RULE}\n"
+        self.assertFalse(cs.text_working(done + "  ⏵⏵ auto mode on (shift+tab to cycle)"))
+
     def test_a_displaced_conversation_stays_listed_until_it_runs_again(self) -> None:
         (old,) = sessions(session("old", name="earlier work"))
         host = cs.Host(pane=pane(), interactive=None)

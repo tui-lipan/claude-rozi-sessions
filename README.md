@@ -45,7 +45,9 @@ foreground process group. The client is in one of two modes:
   with its own conversation is left to rozi's ordinary agent detection.
 - **Attached.** After the client switches to a background session, or opens Claude's session list,
   it runs no conversation of its own. The active row is the session whose name Claude shows above
-  its prompt, or the last one this extension switched to.
+  its prompt, or the last one this extension switched to. When several sessions share that name,
+  it is the one whose turn runs exactly while the client's screen shows a turn running, and it
+  stays the active row after its turn ends until something else says otherwise.
 
 Background sessions are listed too, each with the directory it works in, so rozi groups it by
 that directory's project and branch. Interactive sessions in other terminals are listed where they
@@ -201,7 +203,9 @@ clients in several panes for different projects.
   attached, other than navigating its session list by hand with ←.
 - **The active row of an attached client** comes from the session name Claude draws above its
   prompt, read every half second, so a switch made in Claude shows within about a second. Two
-  sessions with the same name make it ambiguous; the last switch made here is used instead.
+  sessions with the same name make it ambiguous; the last switch made here is used instead, and
+  then whichever of them runs a turn while the screen shows one. When nothing decides, no row is
+  active, and `rozi agents prompt` and `read` refuse to target any of the pane's sessions.
 - Switching reads Claude's screen. A future Claude release that redraws its prompt differently
   makes the extension refuse to switch rather than guess.
 - The service runs only while a rozi client with the extension is attached. With a rozi newer

@@ -86,6 +86,10 @@ SWITCH_FAILURES = (
 GONE_FAILURES = ("was not found", "No conversation found")
 PROMPT = "❯"
 RULE = "─"
+# The row Claude animates above its prompt while a turn runs, `✻ Channeling… (3m 6s · …)`, and the
+# hint its footer shows meanwhile.
+ACTIVITY_ROW = re.compile(r"(?m)^\s*[*·✢✶✻✽]\s+\S.*…(?:\s+\(\d+[smh](?:\s|·)|\s*$)")
+INTERRUPT_HINT = "esc to interrupt"
 
 
 class SessionsError(RuntimeError):
@@ -269,6 +273,10 @@ class HostMemory:
 
     # The session this service last switched the client to, for when the screen does not say.
     last_target: str | None = None
+    # Whether the client's screen showed a turn running at the last look, and the session sharing
+    # its label with others that this last told apart, for when it no longer does.
+    working: bool | None = None
+    last_shown: str | None = None
     # Conversations a switch stopped to take their place, kept listed so they can be switched back
     # to. Claude no longer lists a stopped session as running.
     displaced: dict[str, Session] = field(default_factory=dict)
@@ -443,26 +451,32 @@ def listed_sessions(host: Host, sessions: list[Session], scope: str) -> list[Ses
 
 
 def active_session(
-    host: Host, listed: list[Session], label: str | None, last_target: str | None
+    host: Host, listed: list[Session], label: str | None, memory: HostMemory
 ) -> str | None:
     """The conversation the client has on screen.
 
     A client running its own conversation shows it. An attached client names the session it
     shows above its prompt; that name must match exactly one listed session. Failing both, the
-    last switch this service made stands, while that session is still listed.
+    last switch this service made stands, while that session is still listed. Failing that, of
+    the sessions sharing the label, the one running exactly while the screen shows a turn running
+    is taken, and once told apart it stays taken until something else says otherwise.
     """
     if host.interactive is not None:
         return host.interactive.session_id
-    if label:
-        matches = [
-            session
-            for session in listed
-            if session.name == label or session.short_id == label or session.session_id == label
-        ]
-        if len(matches) == 1:
-            return matches[0].session_id
+    matches = [session for session in listed if label and label in session_names(session)]
+    if len(matches) == 1:
+        return matches[0].session_id
+    last_target = memory.last_target
     if last_target and any(session.session_id == last_target for session in listed):
         return last_target
+    if len(matches) < 2:
+        return None
+    if memory.working is not None:
+        running = [session for session in matches if session.is_working() == memory.working]
+        if len(running) == 1:
+            memory.last_shown = running[0].session_id
+    if any(session.session_id == memory.last_shown for session in matches):
+        return memory.last_shown
     return None
 
 
@@ -503,7 +517,7 @@ def shown_session(
 ) -> str | None:
     """The conversation the client has on screen, among every one it could switch to."""
     listed = listed_sessions(host, sessions, "all") + list(memory.displaced.values())
-    return active_session(host, listed, label, memory.last_target)
+    return active_session(host, listed, label, memory)
 
 
 def assign_owners(
@@ -611,7 +625,7 @@ def host_rows(
         for row_id, started in memory.places.items()
         if any(memory.origin(session).session_id == row_id for session in everything)
     }
-    active = active_session(host, everything, label, memory.last_target)
+    active = active_session(host, everything, label, memory)
     return [
         session.row(session.session_id == active, memory.origin(session).session_id)
         for session in everything
@@ -681,6 +695,12 @@ def switch_failure(screen_text: str, command: str) -> str | None:
         if any(failure in line for failure in SWITCH_FAILURES):
             return line.strip(" ⎿\xa0")
     return None
+
+
+def text_working(screen_text: str) -> bool:
+    """Whether the client's screen shows a turn running: Claude's live activity row, a star frame
+    and a verb ending in an ellipsis, or its interrupt hint. A finished turn's row ends `done`."""
+    return bool(ACTIVITY_ROW.search(screen_text)) or INTERRUPT_HINT in screen_text
 
 
 def text_label(screen_text: str) -> str | None:
@@ -1210,9 +1230,12 @@ class SessionsService:
         for host in hosts.values():
             memory = self.memory.setdefault(host.pane.pane_id, HostMemory())
             label = None
+            memory.working = None
             if host.interactive is None:
                 try:
-                    label = text_label(self.cli.screen_text(host.pane.pane_id))
+                    shown = self.cli.screen_text(host.pane.pane_id)
+                    label = text_label(shown)
+                    memory.working = text_working(shown)
                 except SessionsError:
                     label = None
             labels[host.pane.pane_id] = label
