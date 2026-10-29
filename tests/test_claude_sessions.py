@@ -37,7 +37,7 @@ def session(
     kind: str = "background",
     pid: int | None = None,
     state: str = "done",
-    status: str = "idle",
+    status: str | None = None,
     name: str | None = None,
     cwd: str = "/home/x/rozi",
     started: int = 0,
@@ -50,7 +50,8 @@ def session(
         "kind": kind,
         "startedAt": started,
         "sessionId": sid,
-        "status": status,
+        # Claude reports a session busy while its turn runs.
+        "status": status or ("busy" if state == "working" else "idle"),
     }
     if kind != "interactive":
         value["state"] = state
@@ -112,7 +113,9 @@ class SessionTests(unittest.TestCase):
                 {"sessionId": "s", "state": value, "status": status, **extra}
             ).row_state()
 
-        self.assertEqual(state("working"), ("working", None))
+        self.assertEqual(state("working", "busy"), ("working", None))
+        # Its turn over, though Claude has not marked the task finished: nothing runs.
+        self.assertEqual(state("working"), ("idle", "Waiting"))
         self.assertEqual(state("done"), ("done", None))
         self.assertEqual(
             state("blocked", "waiting", waitingFor="permission prompt"),

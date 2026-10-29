@@ -72,7 +72,8 @@ the background, keeps its row: its ID, its place, and the run history rozi keeps
 | Claude Code reports | Row status |
 | --- | --- |
 | `status` `waiting`: a permission prompt, question, or other dialog is open | `blocked`, with Claude's reason, such as "Permission prompt" |
-| `working` | `working` |
+| `working`, while Claude reports it busy | `working` |
+| `working`, while Claude reports it idle: its turn ended but the task is not marked finished | `idle`, reason "Waiting" |
 | `blocked` with no dialog open | `done`, reason "Awaiting your reply" |
 | `blocked`, for a session waiting for its first prompt | `idle`, titled "New session" |
 | `done` | `done` |

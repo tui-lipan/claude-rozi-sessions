@@ -194,6 +194,10 @@ class Session:
             return "error", "Session failed"
         if self.state == "stopped":
             return "idle", "Stopped"
+        # Claude can still call a session working after its turn ends: a reply without a result,
+        # or a wait on its own background task. Nothing runs, and nothing says it finished.
+        if self.state == "working" and self.status == "idle":
+            return "idle", "Waiting"
         if self.state in {"working", "done", "idle"}:
             return self.state, None
         return ("working" if self.status == "busy" else "idle"), None
