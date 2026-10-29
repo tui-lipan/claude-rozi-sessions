@@ -87,6 +87,24 @@ def prompt(typed: str = "", placeholder: str = 'Try "how does <filepath> work?"'
     )
 
 
+def session_list(prompt_row: list[dict[str, object]] | None = None):
+    """Claude's session list, with its empty prompt as Claude 2.1 draws it unless given."""
+    empty = [
+        {"fg": "#999999", "text": "❯"},
+        {"text": " "},
+        {"fg": "#999999", "text": "describe a task for a new session"},
+    ]
+    return frame(
+        "Your conversation moved to the background — enter opens it · esc returns to it",
+        "Needs input",
+        " ✻ new session                               send a prompt to start",
+        RULE,
+        prompt_row or empty,
+        RULE,
+        "  ⏵⏵ auto mode · enter to return · space to reply · ctrl+x to delete · ? for shortcuts",
+    )
+
+
 class SessionTests(unittest.TestCase):
     def test_states_map_onto_rozis_vocabulary(self) -> None:
         def state(value: str, status: str = "idle", **extra: str) -> tuple[str, str | None]:
@@ -418,15 +436,13 @@ class ScreenTests(unittest.TestCase):
         self.assertIn("dialog", cs.switch_refusal(screen).message)
 
     def test_claudes_session_list_accepts_a_switch_command(self) -> None:
-        listing = frame(
-            "Your conversation moved to the background — enter opens it",
-            RULE,
-            [{"text": "❯\xa0"}, {"text": "describe a task for a new session", "dim": True}],
-            RULE,
-        )
-        screen = cs.read_screen(listing)
+        # Claude draws this placeholder grey like the `❯`, not dim.
+        screen = cs.read_screen(session_list())
         self.assertTrue(screen.agent_view)
+        self.assertFalse(screen.draft)
         self.assertIsNone(cs.switch_refusal(screen))
+        typed = session_list([{"text": "❯ fix it"}])
+        self.assertIn("unsent text", cs.switch_refusal(cs.read_screen(typed)).message)
 
     def test_a_running_turn_does_not_stop_a_switch(self) -> None:
         # Claude holds a command sent mid-turn until the turn ends, so nothing is cut short.
@@ -1027,6 +1043,86 @@ class MovedConversationTests(unittest.TestCase):
         self.assertEqual(self.memory.moved, {})
 
 
+class UnnamedConversationTests(unittest.TestCase):
+    """A client that never sent a prompt is not listed. Opening Claude's session list sends its
+    conversation to the background, untitled, and Claude names no session above the prompt when
+    the client returns to it."""
+
+    def setUp(self) -> None:
+        self.memory = cs.HostMemory()
+        self.host = cs.Host(pane=pane(), interactive=None)
+        # An untitled session left over from before, already listed when the client started.
+        self.stale = session("stale-id", state="blocked", name="stale-id")
+        self.fresh = session("fresh-id", state="blocked", name="fresh-id", started=5)
+        cs.follow_moved(self.memory, self.host, sessions(self.stale), now_ms=0)
+
+    def rows(self, listed, now_ms=1_000):
+        cs.follow_moved(self.memory, self.host, listed, now_ms)
+        return [
+            (row["id"], row["title"], row["active"])
+            for row in cs.host_rows(self.host, listed, "all", self.memory, None)
+        ]
+
+    def test_the_client_shows_the_conversation_it_sent_to_the_background(self) -> None:
+        listed = sessions(self.stale, self.fresh)
+        self.memory.look(True, now_ms=900)
+        # Browsing Claude's session list, nothing is on screen.
+        self.assertEqual(
+            self.rows(listed),
+            [("stale-id", "New session", False), ("fresh-id", "New session", False)],
+        )
+        self.memory.look(False, now_ms=1_500)
+        self.assertEqual(
+            self.rows(listed, now_ms=2_000),
+            [("stale-id", "New session", False), ("fresh-id", "New session", True)],
+        )
+        # Selecting its row is then a switch to what is already on screen: nothing is typed.
+        cli = FakeCli(listed, [prompt()])
+        self.assertTrue(cs.switch(cli, self.host, "fresh-id", self.memory, sleep=lambda _: None))
+        self.assertEqual(actions(cli), [])
+
+    def test_a_listed_client_sends_its_conversation_to_the_background_under_a_new_id(self) -> None:
+        # Claude lists a new client's conversation as interactive under an automatic name, and
+        # untitled under another id once ← sends it to the background.
+        own = session("own-id", kind="interactive", pid=500, name="rozi-fc", started=5)
+        listed = sessions(self.stale, own)
+        (host,) = cs.classify([pane()], listed, group_of=lambda pid: pid)
+        cs.follow_moved(self.memory, host, listed, now_ms=500)
+        self.memory.look(True, now_ms=900)
+        moved = sessions(self.stale, self.fresh)
+        self.rows(moved)
+        self.assertEqual(self.memory.unnamed, "fresh-id")
+        self.memory.look(False, now_ms=1_500)
+        # The row keeps the conversation's first id.
+        self.assertEqual(
+            self.rows(moved, now_ms=2_000),
+            [("stale-id", "New session", False), ("own-id", "New session", True)],
+        )
+        cli = FakeCli(moved, [prompt()])
+        self.assertTrue(cs.switch(cli, self.host, "own-id", self.memory, sleep=lambda _: None))
+        self.assertEqual(actions(cli), [])
+
+    def test_a_session_appearing_long_after_the_session_list_is_not_claimed(self) -> None:
+        self.memory.look(True, now_ms=0)
+        self.memory.look(False, now_ms=1)
+        rows = self.rows(sessions(self.stale, self.fresh), now_ms=cs.MOVE_WINDOW_MS + 1)
+        self.assertEqual([active for _, _, active in rows], [False, False])
+
+    def test_sessions_listed_at_the_first_poll_are_not_claimed(self) -> None:
+        memory = cs.HostMemory()
+        memory.look(True, now_ms=0)
+        cs.follow_moved(memory, self.host, sessions(self.fresh), now_ms=0)
+        self.assertIsNone(memory.unnamed)
+
+    def test_a_session_with_no_prompt_is_never_stopped_to_resume_it(self) -> None:
+        listed = sessions(self.stale, self.fresh)
+        cli = FakeCli(listed, [session_list()])
+        self.assertFalse(cs.switch(cli, self.host, "fresh-id", self.memory, sleep=lambda _: None))
+        ((kind, message),) = actions(cli)
+        self.assertEqual(kind, "notify")
+        self.assertIn("no prompt yet", message)
+
+
 class ServiceTests(unittest.TestCase):
     def test_activations_from_a_replaced_stream_are_ignored(self) -> None:
         service = cs.SessionsService(cs.Settings(), cli=FakeCli([], []))
@@ -1064,6 +1160,23 @@ class ServiceTests(unittest.TestCase):
         self.assertFalse(service.label_changed())
         cli.label = "second"
         self.assertTrue(service.label_changed())
+        self.assertFalse(service.label_changed())
+
+    def test_opening_claudes_session_list_is_noticed(self) -> None:
+        class ListCli:
+            text = showing("first")
+
+            def screen_text(self, pane_id: int) -> str:
+                return self.text
+
+        cli = ListCli()
+        service = cs.SessionsService(cs.Settings(), cli=cli)
+        service.hosts[1] = cs.Host(pane=pane(), interactive=None)
+        service.memory[1] = cs.HostMemory()
+        self.assertFalse(service.label_changed())
+        cli.text = "Your conversation moved to the background — enter opens it\n❯"
+        self.assertTrue(service.label_changed())
+        self.assertTrue(service.memory[1].browsing)
         self.assertFalse(service.label_changed())
 
     def test_a_client_running_its_own_conversation_is_not_read_between_polls(self) -> None:

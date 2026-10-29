@@ -47,7 +47,10 @@ foreground process group. The client is in one of two modes:
   it runs no conversation of its own. The active row is the session whose name Claude shows above
   its prompt, or the last one this extension switched to. When several sessions share that name,
   it is the one whose turn runs exactly while the client's screen shows a turn running, and it
-  stays the active row after its turn ends until something else says otherwise.
+  stays the active row after its turn ends until something else says otherwise. Claude shows no
+  name for a session waiting for its first prompt, so when ← sends such a conversation to the
+  background, its "New session" row is the active row whenever the client returns to it. While the
+  client shows Claude's session list, no row is active.
 
 Background sessions are listed too, each with the directory it works in, so rozi groups it by
 that directory's project and branch. Interactive sessions in other terminals are listed where they
@@ -136,7 +139,7 @@ and only then presses Enter.
 
 The extension does not switch, and says why in a rozi notification, when:
 
-- Claude's prompt holds unsent text. Claude's dim placeholder does not count.
+- Claude's prompt holds unsent text. Claude's placeholder text does not count.
 - Claude is showing a question, an approval dialog, or any screen without its prompt.
 - From an attached client, the selected session is still working. Stopping it would cut its turn
   short.
@@ -146,6 +149,8 @@ The extension does not switch, and says why in a rozi notification, when:
   Claude, or with `claude attach <id>`.
 - It cannot tell which session an attached client shows, because no name matches exactly one row.
 - The selected session has ended.
+- The selected session is waiting for its first prompt. Claude cannot resume it, and stopping it
+  would only end it. Open it with ← in Claude, or with `claude attach <id>`.
 
 While Claude is responding, the switch does not interrupt it. Claude queues the command and runs
 it once the turn ends, and the extension says so in a notification and follows the queued switch

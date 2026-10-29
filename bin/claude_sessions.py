@@ -62,10 +62,12 @@ CLIENT_PROGRAMS = {"claude", "claude-code"}
 FAILED_STATES = {"failed", "error", "errored", "crashed"}
 # What a row says for a session Claude has not titled yet.
 NEW_SESSION = "New session"
+# The placeholder of the prompt under Claude's session list. Claude draws it grey, not dim.
+AGENT_VIEW_PLACEHOLDER = "describe a task for a new session"
 # Shown by Claude in place of a conversation's prompt: its list of every session, whose prompt
 # starts a *new* session. Typing a command there would create one.
 AGENT_VIEW_MARKERS = (
-    "describe a task for a new session",
+    AGENT_VIEW_PLACEHOLDER,
     "Your conversation moved to the background",
     "enter to return",
 )
@@ -287,8 +289,14 @@ class HostMemory:
     # lists it again in the background, and when it left.
     own: Session | None = None
     own_left_at: int | None = None
-    # Every session id the previous poll listed.
-    seen: set[str] = field(default_factory=set)
+    # Every session id the previous poll listed; `None` before the first poll.
+    seen: set[str] | None = None
+    # Whether the client showed Claude's session list at the last look, and when it last did.
+    browsing: bool = False
+    browsed_at: int | None = None
+    # The untitled conversation the client sent to the background by opening Claude's session list
+    # before its first prompt. Claude names no session above the prompt while showing it.
+    unnamed: str | None = None
     # Background sessions that continue a conversation this pane listed under another id, mapped to
     # that conversation. Claude keeps the transcript under the first id and resumes it only by that
     # id, and the row keeps it too, with its place, so rozi keeps the row's history.
@@ -296,6 +304,12 @@ class HostMemory:
     # Where each published row sorts: when its conversation started, as first seen. A
     # conversation resumed in another worker reports that worker's start, which must not move it.
     places: dict[str, int] = field(default_factory=dict)
+
+    def look(self, browsing: bool, now_ms: int) -> None:
+        """Note whether the client shows Claude's session list now."""
+        self.browsing = browsing
+        if browsing:
+            self.browsed_at = now_ms
 
     def origin(self, session: Session) -> Session:
         """The conversation `session`'s row was first published for."""
@@ -459,7 +473,9 @@ def active_session(
     shows above its prompt; that name must match exactly one listed session. Failing both, the
     last switch this service made stands, while that session is still listed. Failing that, of
     the sessions sharing the label, the one running exactly while the screen shows a turn running
-    is taken, and once told apart it stays taken until something else says otherwise.
+    is taken, and once told apart it stays taken until something else says otherwise. A client
+    showing no name, and not Claude's session list, shows the untitled conversation it sent to the
+    background, while that is still listed untitled.
     """
     if host.interactive is not None:
         return host.interactive.session_id
@@ -469,6 +485,10 @@ def active_session(
     last_target = memory.last_target
     if last_target and any(session.session_id == last_target for session in listed):
         return last_target
+    if label is None and not memory.browsing and any(
+        session.session_id == memory.unnamed and session.untitled for session in listed
+    ):
+        return memory.unnamed
     if len(matches) < 2:
         return None
     if memory.working is not None:
@@ -481,12 +501,16 @@ def active_session(
 
 
 def follow_moved(memory: HostMemory, host: Host, sessions: list[Session], now_ms: int) -> None:
-    """Notice the client's own conversation reappearing in the background under a new id.
+    """Notice the client's own conversation reappearing in the background.
 
-    `/resume` from a client's own conversation moves it to the background, where Claude lists it
-    as a new session. The one new background session in the same directory, appearing soon after,
-    is that conversation, and keeps its row.
+    `/resume` from a client's own conversation, or opening Claude's session list with ←, moves it
+    to the background, where Claude lists it as a new session. The one new background session in
+    the same directory, appearing soon after, is that conversation, and keeps its row. Moved by ←
+    while untitled, it is what the client shows when it returns without naming a session. A client
+    Claude does not list yet sends its conversation there too: the one new untitled session in the
+    pane's directory appearing while, or soon after, the client shows that list.
     """
+    browsed = memory.browsed_at is not None and now_ms - memory.browsed_at <= MOVE_WINDOW_MS
     if host.interactive is not None:
         memory.own = host.interactive
         memory.own_left_at = None
@@ -497,16 +521,31 @@ def follow_moved(memory: HostMemory, host: Host, sessions: list[Session], now_ms
             session
             for session in sessions
             if session.kind == "background"
-            and session.session_id not in memory.seen
+            and session.session_id not in (memory.seen or set())
             and session.cwd == memory.own.cwd
             and session.started_at >= memory.own.started_at
         ]
         if len(fresh) == 1:
             memory.moved[fresh[0].session_id] = memory.origin(memory.own)
             memory.own = None
+            if browsed and fresh[0].untitled:
+                memory.unnamed = fresh[0].session_id
         elif now_ms - memory.own_left_at > MOVE_WINDOW_MS:
             memory.own = None
+    elif memory.seen is not None and browsed:
+        fresh = [
+            session
+            for session in sessions
+            if session.kind == "background"
+            and session.untitled
+            and session.session_id not in memory.seen
+            and is_under(session.cwd, host.pane.cwd)
+        ]
+        if len(fresh) == 1:
+            memory.unnamed = fresh[0].session_id
     memory.seen = {session.session_id for session in sessions}
+    if memory.unnamed not in memory.seen:
+        memory.unnamed = None
     for session_id in list(memory.moved):
         if session_id not in memory.seen and session_id not in memory.displaced:
             del memory.moved[session_id]
@@ -677,11 +716,20 @@ def read_screen(frame_rows: list[list[dict[str, Any]]]) -> Screen:
     texts = [row_text(row) for row in frame_rows]
     joined = "\n".join(texts)
     span = composer_span(frame_rows)
+    agent_view = text_agent_view(joined)
+    composer = read_composer(frame_rows[span[0] : span[1]]) if span else None
+    if agent_view and composer is not None and composer.text == AGENT_VIEW_PLACEHOLDER:
+        composer = Composer(text="")
     return Screen(
-        agent_view=any(marker in joined for marker in AGENT_VIEW_MARKERS),
-        composer=read_composer(frame_rows[span[0] : span[1]]) if span else None,
+        agent_view=agent_view,
+        composer=composer,
         label=rule_label(texts[span[0] - 1]) if span else None,
     )
+
+
+def text_agent_view(screen_text: str) -> bool:
+    """Whether the client's screen shows Claude's session list."""
+    return any(marker in screen_text for marker in AGENT_VIEW_MARKERS)
 
 
 def switch_failure(screen_text: str, command: str) -> str | None:
@@ -793,6 +841,13 @@ def plan_switch(
     target = by_id.get(target_id) or memory.displaced.get(target_id)
     if target is None:
         return Refusal("That Claude session has ended, so there is nothing to switch to.")
+    if target.untitled:
+        # Claude finds no conversation to resume before the first prompt, and stopping it first
+        # would only end it.
+        return Refusal(
+            f"“{NEW_SESSION}” has no prompt yet, so Claude cannot resume it. Open it from "
+            f"Claude's session list with ←, or run `claude attach {target.short_id}`."
+        )
     # Checked before anything is stopped or typed: Claude would answer "not found" only after the
     # target had been stopped for nothing.
     if not same_repository(host.pane.cwd, target.cwd, repository):
@@ -946,6 +1001,7 @@ def switch(
         return False
     sessions = cli.sessions()
     screen = cli.screen(pane_id)
+    memory.look(screen.agent_view, int(time.time() * 1000))
     active = shown_session(host, sessions, memory, screen.label)
     if target_id == active:
         return True
@@ -1231,15 +1287,16 @@ class SessionsService:
             memory = self.memory.setdefault(host.pane.pane_id, HostMemory())
             label = None
             memory.working = None
+            now = int(time.time() * 1000)
             if host.interactive is None:
                 try:
                     shown = self.cli.screen_text(host.pane.pane_id)
                     label = text_label(shown)
                     memory.working = text_working(shown)
+                    memory.look(text_agent_view(shown), now)
                 except SessionsError:
                     label = None
             labels[host.pane.pane_id] = label
-            now = int(time.time() * 1000)
             if memory.pending is not None:
                 try:
                     follow_pending(self.cli, memory, now)
@@ -1322,25 +1379,34 @@ class SessionsService:
 
     def label_changed(self) -> bool:
         """Whether an attached client now names another session above its prompt than at the last
-        look.
+        look, or opened or left Claude's session list.
 
         Claude lists a session in `claude agents --json` only moments after the client opens it, but
         the client names it at once. A client running its own conversation shows no label, and is
         left to the poll."""
         labels: dict[int, str | None] = {}
+        browsing_changed = False
+        now = int(time.time() * 1000)
         for pane_id, host in self.hosts.items():
             if host.interactive is not None:
                 continue
             try:
-                labels[pane_id] = text_label(self.cli.screen_text(pane_id))
+                shown = self.cli.screen_text(pane_id)
             except SessionsError:
                 labels[pane_id] = self.labels.get(pane_id)
+                continue
+            labels[pane_id] = text_label(shown)
+            memory = self.memory.get(pane_id)
+            if memory is not None:
+                browsing = text_agent_view(shown)
+                browsing_changed |= browsing != memory.browsing
+                memory.look(browsing, now)
         changed = any(
             pane_id in self.labels and label != self.labels[pane_id]
             for pane_id, label in labels.items()
         )
         self.labels = labels
-        return changed
+        return changed or browsing_changed
 
     def run(self) -> int:
         while True:
