@@ -356,6 +356,11 @@ class RowTests(unittest.TestCase):
         self.assertFalse(cs.is_under("/home/x/rozi-old", "/home/x/rozi"))
 
 
+def k(pane_id: int) -> tuple[str, int]:
+    """The key of a pane no session instance qualifies."""
+    return "", pane_id
+
+
 def host_pane(pane_id: int, pid: int | None = None, cwd: str = "/home/x/rozi"):
     return cs.Pane(pane_id=pane_id, cwd=cwd, program="claude", agent=None,
                    foreground_pid=pid if pid is not None else 500 + pane_id)
@@ -395,35 +400,35 @@ class OwnershipTests(unittest.TestCase):
         listed = sessions(session("bg", name="docs"), session("other", name="other"),
                           session("one", kind="interactive", pid=501))
         hosts = cs.classify([host_pane(1), host_pane(2)], listed, group_of=lambda pid: pid)
-        owners, rows = owned_rows(hosts, listed, shown={1: "one", 2: "bg"})
-        self.assertEqual(owners, {"bg": 2, "other": 1})
+        owners, rows = owned_rows(hosts, listed, shown={k(1): "one", k(2): "bg"})
+        self.assertEqual(owners, {"bg": k(2), "other": k(1)})
         self.assertEqual(rows, {1: ["one", "other"], 2: ["bg"]})
 
     def test_a_conversation_sent_to_the_background_stays_with_its_client(self) -> None:
         listed = sessions(session("moved"), session("own2", kind="interactive", pid=502))
         hosts = cs.classify([host_pane(1), host_pane(2)], listed, group_of=lambda pid: pid)
         (origin,) = sessions(session("first"))
-        memories = {2: cs.HostMemory(moved={"moved": origin})}
+        memories = {k(2): cs.HostMemory(moved={"moved": origin})}
         owners, _ = owned_rows(hosts, listed, memories=memories)
-        self.assertEqual(owners["moved"], 2)
+        self.assertEqual(owners["moved"], k(2))
 
     def test_a_session_stays_with_its_pane_after_the_client_moves_on(self) -> None:
         listed = sessions(session("bg"), session("one", kind="interactive", pid=501))
         hosts = cs.classify([host_pane(1), host_pane(2)], listed, group_of=lambda pid: pid)
-        owners, _ = owned_rows(hosts, listed, owners={"bg": 2})
-        self.assertEqual(owners["bg"], 2)
+        owners, _ = owned_rows(hosts, listed, owners={"bg": k(2)})
+        self.assertEqual(owners["bg"], k(2))
         # Its pane closed: exactly one other takes it over.
-        owners, _ = owned_rows(hosts[:1], listed, owners={"bg": 3})
-        self.assertEqual(owners["bg"], 1)
+        owners, _ = owned_rows(hosts[:1], listed, owners={"bg": k(3)})
+        self.assertEqual(owners["bg"], k(1))
 
     def test_a_session_goes_to_the_pane_nearest_above_it(self) -> None:
         listed = sessions(session("deep", cwd="/home/x/rozi/tree"), session("far", cwd="/srv"))
         hosts = [cs.Host(host_pane(1, cwd="/home/x"), None),
                  cs.Host(host_pane(2, cwd="/home/x/rozi"), None)]
         owners, _ = owned_rows(hosts, listed)
-        self.assertEqual((owners["deep"], owners["far"]), (2, 1))
+        self.assertEqual((owners["deep"], owners["far"]), (k(2), k(1)))
         owners, _ = owned_rows(hosts, listed, scope="cwd")
-        self.assertEqual(owners, {"deep": 2})
+        self.assertEqual(owners, {"deep": k(2)})
 
     def test_a_poll_publishes_each_background_session_once(self) -> None:
         listed = sessions(
@@ -442,7 +447,7 @@ class OwnershipTests(unittest.TestCase):
         service.publish = lambda pane_id, rows: published.__setitem__(
             pane_id, [row["id"] for row in rows])
         service.poll()
-        self.assertEqual(published, {1: ["bg", "one"], 2: []})
+        self.assertEqual(published, {k(1): ["bg", "one"], k(2): []})
 
 
 class ScreenTests(unittest.TestCase):
@@ -1159,27 +1164,167 @@ class UnnamedConversationTests(unittest.TestCase):
         self.assertIn("no prompt yet", message)
 
 
+class AttachedSessionsTests(unittest.TestCase):
+    """A session off screen stays listed by rozi, under the same pane ids as the one on screen."""
+
+    def make(self, listed, panes):
+        class AttachedCli(FakeCli):
+            def panes(self):
+                return list(self.current)
+
+            def screen_text(self, pane_id):
+                self.reads.append(pane_id)
+                return showing("Shown")
+
+        cli = AttachedCli(listed, [])
+        cli.reads, cli.current = [], panes
+        service = cs.SessionsService(cs.Settings(), cli=cli)
+        service.hooks_checked, service.hooks_present = True, True
+        self.published: dict = {}
+        service.publish = lambda key, rows: self.published.__setitem__(key, rows)
+        self.stopped: list = []
+        service.stop_publisher = self.stopped.append
+        return service, cli
+
+    def client(self, instance, on_screen, pid):
+        return cs.Pane(1, "/home/x/rozi", "claude", None, pid, instance=instance, on_screen=on_screen)
+
+    def test_the_wire_says_which_session_a_pane_belongs_to(self) -> None:
+        value = {"id": 1, "reference": {"session_instance": "a"}, "on_screen": False}
+        self.assertEqual(cs.Pane.from_wire(value).key, ("a", 1))
+        self.assertFalse(cs.Pane.from_wire(value).on_screen)
+        self.assertEqual(cs.Pane.from_wire({"id": 1}).key, ("", 1))
+        self.assertTrue(cs.Pane.from_wire({"id": 1}).on_screen)
+
+    def test_panes_sharing_an_id_across_sessions_publish_separately(self) -> None:
+        listed = sessions(
+            session("own-a", kind="interactive", pid=500),
+            session("own-b", kind="interactive", pid=600),
+            session("bg-a"),
+            session("bg-b"),
+        )
+        service, _ = self.make(
+            listed, [self.client("a", True, 500), self.client("b", False, 600)]
+        )
+        service.owners = {"bg-a": ("a", 1), "bg-b": ("b", 1)}
+        service.poll()
+        ids = {key: {row["id"] for row in rows} for key, rows in self.published.items()}
+        self.assertEqual(ids, {("a", 1): {"own-a", "bg-a"}, ("b", 1): {"own-b", "bg-b"}})
+
+    def test_each_stream_names_its_session(self) -> None:
+        service = cs.SessionsService(cs.Settings(), cli=FakeCli([], []))
+        with mock.patch.object(cs.subprocess, "Popen") as popen:
+            popen.return_value.stdout = iter(())
+            service.start_publisher(("b", 1))
+        environment = popen.call_args.kwargs["env"]
+        self.assertEqual(
+            (environment["ROZI_PANE"], environment["ROZI_SESSION_INSTANCE"]), ("1", "b")
+        )
+        with (
+            mock.patch.dict(cs.os.environ, {"ROZI_SESSION_INSTANCE": "inherited"}),
+            mock.patch.object(cs.subprocess, "Popen") as popen,
+        ):
+            popen.return_value.stdout = iter(())
+            service.start_publisher(k(2))
+        self.assertNotIn("ROZI_SESSION_INSTANCE", popen.call_args.kwargs["env"])
+
+    def test_a_session_off_screen_keeps_its_rows_current_without_reading_a_screen(self) -> None:
+        listed = sessions(session("bg", state="idle"))
+        service, cli = self.make(listed, [self.client("a", False, 500), self.client("b", True, 600)])
+        service.poll()
+        owner = service.owners["bg"]
+        cli.listed = sessions(session("bg", state="working"))
+        service.poll()
+        self.assertEqual(self.stopped, [])
+        (row,) = [row for row in self.published[owner] if row["id"] == "bg"]
+        self.assertEqual(row["status"], "working")
+        self.assertEqual(set(cli.reads), {1}, "only the on-screen pane's screen is read")
+        self.assertEqual(len(cli.reads), 2, "once per poll, for the session on screen")
+
+    def test_switching_sessions_keeps_a_session_off_screen_in_its_active_row(self) -> None:
+        listed = sessions(session("one", name="One"), session("two", name="Two"))
+        on_screen = self.client("a", True, 500)
+        service, cli = self.make(listed, [on_screen])
+        cli.screen_text = lambda pane_id: showing("One")
+        self.assertFalse(service.label_changed())
+        service.hosts = {on_screen.key: cs.Host(on_screen, None)}
+        service.label_changed()
+        service.poll()
+        active = [row["id"] for row in self.published["a", 1] if row["active"]]
+        self.assertEqual(active, ["one"])
+
+        off_screen = self.client("a", False, 500)
+        cli.current = [off_screen, self.client("b", True, 600)]
+        cli.screen_text = lambda pane_id: showing("Two")
+        service.poll()
+        service.label_changed()
+        service.poll()
+        active = [row["id"] for row in self.published["a", 1] if row["active"]]
+        self.assertEqual(active, ["one"], "what another session's screen shows says nothing")
+
+    def test_a_client_exiting_off_screen_withdraws_only_its_pane(self) -> None:
+        listed = sessions(session("bg"))
+        service, cli = self.make(listed, [self.client("a", False, 500), self.client("b", True, 600)])
+        service.publishers = {("a", 1): object(), ("b", 1): object()}
+        cli.current = [self.client("a", False, None), self.client("b", True, 600)]
+        service.poll()
+        self.assertEqual(self.stopped, [("a", 1)])
+
+    def test_a_detached_session_withdraws_its_panes(self) -> None:
+        service, cli = self.make(sessions(), [self.client("b", True, 600)])
+        service.publishers = {("a", 1): object(), ("b", 1): object()}
+        service.poll()
+        self.assertEqual(self.stopped, [("a", 1)])
+
+    def test_a_listing_that_fails_withdraws_nothing(self) -> None:
+        service, cli = self.make(sessions(), [])
+        service.publishers = {("a", 1): object()}
+
+        def fail():
+            raise cs.SessionsError("no answer")
+
+        cli.panes = fail
+        with self.assertRaises(cs.SessionsError):
+            service.poll()
+        self.assertEqual(self.stopped, [])
+
+    def test_activations_stay_with_the_session_that_published_the_row(self) -> None:
+        service, cli = self.make(sessions(), [])
+        service.hosts = {
+            ("a", 1): cs.Host(self.client("a", False, 500), None),
+            ("b", 1): cs.Host(self.client("b", True, 600), None),
+        }
+        switched = []
+        with mock.patch.object(cs, "switch", lambda _cli, host, row, _memory: switched.append(
+            (host.pane.key, row)
+        )):
+            service.activate(("a", 1), "row")
+            self.assertEqual(switched, [], "pane 1 means another session's pane now")
+            service.activate(("b", 1), "row")
+        self.assertEqual(switched, [(("b", 1), "row")])
+
+
 class ServiceTests(unittest.TestCase):
     def test_activations_from_a_replaced_stream_are_ignored(self) -> None:
         service = cs.SessionsService(cs.Settings(), cli=FakeCli([], []))
-        service.hosts[1] = cs.Host(pane=pane(), interactive=None)
+        service.hosts[k(1)] = cs.Host(pane=pane(), interactive=None)
         seen = []
         service.activate = lambda pane_id, row: seen.append((pane_id, row))
 
         class Current:
             token = 2
 
-        service.publishers[1] = Current()
-        self.assertTrue(service.handle(("activate", 1, 1, "old-row")))
-        self.assertTrue(service.handle(("activate", 1, 2, "row")))
-        self.assertEqual(seen, [(1, "row")])
+        service.publishers[k(1)] = Current()
+        self.assertTrue(service.handle(("activate", k(1), 1, "old-row")))
+        self.assertTrue(service.handle(("activate", k(1), 2, "row")))
+        self.assertEqual(seen, [(k(1), "row")])
         self.assertFalse(service.handle(("stop",)))
 
     def test_the_stream_declares_its_rows_agents(self) -> None:
         service = cs.SessionsService(cs.Settings(), cli=FakeCli([], []))
         with mock.patch.object(cs.subprocess, "Popen") as popen:
             popen.return_value.stdout = iter(())
-            service.start_publisher(7)
+            service.start_publisher(k(7))
         self.assertEqual(popen.call_args.args[0][1:], ["publish", "--kind", "agent"])
 
     def test_a_new_label_on_an_attached_client_is_noticed(self) -> None:
@@ -1191,7 +1336,7 @@ class ServiceTests(unittest.TestCase):
 
         cli = LabelCli()
         service = cs.SessionsService(cs.Settings(), cli=cli)
-        service.hosts[1] = cs.Host(pane=pane(), interactive=None)
+        service.hosts[k(1)] = cs.Host(pane=pane(), interactive=None)
         self.assertFalse(service.label_changed())
         self.assertFalse(service.label_changed())
         cli.label = "second"
@@ -1207,26 +1352,26 @@ class ServiceTests(unittest.TestCase):
 
         cli = ListCli()
         service = cs.SessionsService(cs.Settings(), cli=cli)
-        service.hosts[1] = cs.Host(pane=pane(), interactive=None)
-        service.memory[1] = cs.HostMemory()
+        service.hosts[k(1)] = cs.Host(pane=pane(), interactive=None)
+        service.memory[k(1)] = cs.HostMemory()
         self.assertFalse(service.label_changed())
         cli.text = "Your conversation moved to the background — enter opens it\n❯"
         self.assertTrue(service.label_changed())
-        self.assertTrue(service.memory[1].browsing)
+        self.assertTrue(service.memory[k(1)].browsing)
         self.assertFalse(service.label_changed())
 
     def test_a_client_running_its_own_conversation_is_not_read_between_polls(self) -> None:
         cli = FakeCli([], [])
         service = cs.SessionsService(cs.Settings(), cli=cli)
-        service.hosts[1] = cs.Host(pane=pane(), interactive=session("own"))
+        service.hosts[k(1)] = cs.Host(pane=pane(), interactive=session("own"))
         self.assertFalse(service.label_changed())
         self.assertEqual(cli.calls, [])
 
     def test_switching_can_be_turned_off(self) -> None:
         cli = FakeCli([], [])
         service = cs.SessionsService(cs.Settings(switching=False), cli=cli)
-        service.hosts[1] = cs.Host(pane=pane(), interactive=None)
-        service.activate(1, "row")
+        service.hosts[k(1)] = cs.Host(pane=pane(), interactive=None)
+        service.activate(k(1), "row")
         self.assertEqual([call[0] for call in cli.calls], ["notify"])
 
 

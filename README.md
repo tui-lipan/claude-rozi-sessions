@@ -10,7 +10,7 @@ client to that conversation.
 
 ## Requirements
 
-- rozi 0.0.36 or newer
+- rozi 0.0.40 or newer
 - Claude Code 2.1.285 or newer, for `claude agents --json` and `/resume` of a background session
 - Python 3 available as `python`
 - Linux or macOS. See [Limits](#limits).
@@ -57,6 +57,11 @@ foreground process group. The client is in one of two modes:
 Background sessions are listed too, each with the directory it works in, so rozi groups it by
 that directory's project and branch. Interactive sessions in other terminals are listed where they
 run, not here.
+
+Every session your client has attached keeps its rows while another is on screen, and they stay
+current from `claude agents --json`. The active row is the one exception: it comes from reading the
+screen, so it stays as it was until that session is on screen again. A background session keeps
+its pane across sessions too, so it does not move when you switch.
 
 With Claude clients in several panes, each background session is listed in one of them only:
 
