@@ -62,6 +62,8 @@ CLIENT_PROGRAMS = {"claude", "claude-code"}
 FAILED_STATES = {"failed", "error", "errored", "crashed"}
 # What a row says for a session Claude has not titled yet.
 NEW_SESSION = "New session"
+# The terminal title Claude keeps until it titles the conversation.
+CLIENT_TITLE = "Claude Code"
 # The placeholder of the prompt under Claude's session list. Claude draws it grey, not dim.
 AGENT_VIEW_PLACEHOLDER = "describe a task for a new session"
 # Shown by Claude in place of a conversation's prompt: its list of every session, whose prompt
@@ -150,6 +152,9 @@ class Session:
     # Claude names a session after its own ID until it titles it, which it does after the first
     # prompt.
     untitled: bool = False
+    # A client's own conversation carries a generated name, `<directory>-<two hex digits>`, for as
+    # long as it runs. Only its terminal title says what it is about.
+    generated_name: bool = False
 
     @classmethod
     def from_wire(cls, value: object) -> Session | None:
@@ -161,18 +166,22 @@ class Session:
         short_id = text(value.get("id")) or session_id[:8]
         name = text(value.get("name"))
         untitled = name in {short_id, session_id}
+        kind = (text(value.get("kind")) or "").casefold()
+        cwd = text(value.get("cwd"))
+        generated_name = kind == "interactive" and is_generated_name(name, cwd)
         return cls(
             session_id=session_id,
             short_id=short_id,
             pid=integer(value.get("pid")),
-            kind=(text(value.get("kind")) or "").casefold(),
-            cwd=text(value.get("cwd")),
-            name=None if untitled else name,
+            kind=kind,
+            cwd=cwd,
+            name=None if untitled or generated_name else name,
             state=(text(value.get("state")) or "").casefold(),
             status=(text(value.get("status")) or "").casefold(),
             waiting_for=text(value.get("waitingFor")),
             started_at=integer(value.get("startedAt")) or 0,
             untitled=untitled,
+            generated_name=generated_name,
         )
 
     def row_state(self) -> tuple[str, str | None]:
@@ -212,7 +221,7 @@ class Session:
         conversation = conversation or self.session_id
         row: dict[str, object] = {
             "id": conversation,
-            "title": self.name or (NEW_SESSION if self.untitled else ""),
+            "title": self.name or (NEW_SESSION if self.untitled or self.generated_name else ""),
             "status": status,
             "active": active,
             # Ties the row to the conversation Claude's own hooks report on, if they run, and is
@@ -238,6 +247,7 @@ class Pane:
     agent: str | None
     foreground_pid: int | None
     session: str | None = None
+    title: str | None = None
 
     @classmethod
     def from_wire(cls, value: object) -> Pane | None:
@@ -253,6 +263,7 @@ class Pane:
             agent=text(value.get("agent")),
             foreground_pid=integer(value.get("foreground_pid")),
             session=text(value.get("session")),
+            title=text(value.get("title")),
         )
 
     def runs_claude(self) -> bool:
@@ -360,6 +371,21 @@ def integer(value: object) -> int | None:
         return None
 
 
+def is_generated_name(name: str | None, cwd: str | None) -> bool:
+    """Whether `name` is the one Claude generates for a client's own conversation in `cwd`."""
+    if not name or not cwd:
+        return False
+    directory = os.path.basename(os.path.normpath(cwd))
+    return re.fullmatch(re.escape(directory) + r"-[0-9a-f]{2}", name) is not None
+
+
+def conversation_title(pane_title: str | None) -> str | None:
+    """What a client's terminal title says about its conversation, without the status mark Claude
+    puts before it. `None` until Claude has titled the conversation."""
+    title = re.sub(r"^\W+", "", pane_title or "").strip()
+    return title if title and title != CLIENT_TITLE else None
+
+
 def process_group(pid: int | None) -> int | None:
     """The process group `pid` runs in, which is what rozi reports as a pane's `foreground_pid`.
 
@@ -441,6 +467,8 @@ def classify(
             ),
             None,
         )
+        if own is not None and own.generated_name:
+            own = replace(own, name=conversation_title(pane.title))
         hosts.append(Host(pane=pane, interactive=own))
     return hosts
 

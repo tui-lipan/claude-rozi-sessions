@@ -9,6 +9,7 @@ import sys
 import tempfile
 import time
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest import mock
 
@@ -188,6 +189,38 @@ class SessionTests(unittest.TestCase):
         self.assertIsNone(cs.activation('{"activate":""}'))
         self.assertIsNone(cs.activation("garbage"))
         self.assertIsNone(cs.activation('["activate"]'))
+
+
+class GeneratedNameTests(unittest.TestCase):
+    def own_row(self, name: str, title: str | None) -> dict[str, object]:
+        listed = sessions(
+            session("own", kind="interactive", pid=500, name=name),
+            session("bg", pid=900, name="Other work"),
+        )
+        hosts = cs.classify(
+            [replace(pane(), title=title)], listed, group_of=lambda pid: pid
+        )
+        rows = cs.host_rows(hosts[0], listed, "all", cs.HostMemory(), None)
+        return next(row for row in rows if row["id"] == "own")
+
+    def test_a_new_conversation_reads_as_new_rather_than_by_its_generated_name(self) -> None:
+        self.assertEqual(self.own_row("rozi-c3", "Claude Code")["title"], cs.NEW_SESSION)
+        self.assertEqual(self.own_row("rozi-c3", None)["title"], cs.NEW_SESSION)
+
+    def test_a_generated_name_gives_way_to_the_title_claude_keeps_current(self) -> None:
+        self.assertEqual(
+            self.own_row("rozi-c3", "⠂ Activity sidebar naming")["title"],
+            "Activity sidebar naming",
+        )
+
+    def test_a_chosen_name_stays_whatever_the_terminal_title_says(self) -> None:
+        self.assertEqual(self.own_row("my refactor", "Something else")["title"], "my refactor")
+        # Another directory's name, or a longer suffix, is not the generated shape.
+        self.assertEqual(self.own_row("rozi-release", "Something else")["title"], "rozi-release")
+
+    def test_a_generated_name_can_still_be_switched_to(self) -> None:
+        listed = sessions(session("own", kind="interactive", pid=500, name="rozi-c3"))
+        self.assertFalse(listed[0].untitled)
 
 
 class ClassifyTests(unittest.TestCase):

@@ -42,7 +42,9 @@ foreground process group. The client is in one of two modes:
 
 - **Running its own conversation.** Claude lists that conversation as an interactive session whose
   process is in the pane's foreground process group. It is the active row. The pane publishes rows only when there is at least one background session besides it; a client alone
-  with its own conversation is left to rozi's ordinary agent detection.
+  with its own conversation is left to rozi's ordinary agent detection. Claude gives this
+  conversation a generated name such as `myproject-c3` for as long as it runs, so the row shows the
+  title Claude puts on the terminal instead, or "New session" until Claude has titled it.
 - **Attached.** After the client switches to a background session, or opens Claude's session list,
   it runs no conversation of its own. The active row is the session whose name Claude shows above
   its prompt, or the last one this extension switched to. When several sessions share that name,
