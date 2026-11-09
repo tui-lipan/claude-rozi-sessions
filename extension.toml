@@ -2,9 +2,9 @@
 id = "claude-rozi-sessions"
 title = "Claude Code sessions"
 description = "One Activity row per Claude Code conversation, grouped by worktree; selecting a row switches Claude to it"
-version = "0.5.5"
+version = "0.6.0"
 api = 1
-min_rozi = "0.0.36"
+min_rozi = "0.0.40"
 homepage = "https://github.com/tui-lipan/claude-rozi-sessions"
 screenshots = ["docs/screenshot.webp"]
 
@@ -34,4 +34,10 @@ hidden = true
 [[services]]
 name = "watch"
 exec = ["python", "{extension_dir}/bin/claude_sessions.py"]
+# Beside each session's Claude Code, whose background sessions and processes a client on another
+# machine cannot see.
+placement = "each-host"
+# Keep every attached session's rows current, on screen or not. Typing and screen reads stay on the
+# session on screen.
+session_scope = "attached"
 restart = "on-failure"

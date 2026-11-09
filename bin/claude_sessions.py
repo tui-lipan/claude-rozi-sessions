@@ -239,6 +239,10 @@ class Session:
         return row
 
 
+# A pane's identity: its session instance and its id, which repeats across sessions.
+PaneKey = tuple[str, int]
+
+
 @dataclass(frozen=True)
 class Pane:
     pane_id: int
@@ -248,6 +252,11 @@ class Pane:
     foreground_pid: int | None
     session: str | None = None
     title: str | None = None
+    # The session the pane belongs to, and whether it is the one on screen. Commands naming a pane
+    # reach the session on screen, so `capture-pane`, `send-text`, and `send-keys` are for those
+    # panes only.
+    instance: str | None = None
+    on_screen: bool = True
 
     @classmethod
     def from_wire(cls, value: object) -> Pane | None:
@@ -264,7 +273,13 @@ class Pane:
             foreground_pid=integer(value.get("foreground_pid")),
             session=text(value.get("session")),
             title=text(value.get("title")),
+            instance=session_instance(value),
+            on_screen=value.get("on_screen") is not False,
         )
+
+    @property
+    def key(self) -> PaneKey:
+        return self.instance or "", self.pane_id
 
     def runs_claude(self) -> bool:
         return self.agent == "claude" or (self.program or "").casefold() in CLIENT_PROGRAMS
@@ -443,6 +458,11 @@ def parse_panes(output: str) -> list[Pane]:
     return [pane for item in data if (pane := Pane.from_wire(item)) is not None]
 
 
+def session_instance(pane: dict[str, Any]) -> str | None:
+    reference = pane.get("reference")
+    return text(reference.get("session_instance")) if isinstance(reference, dict) else None
+
+
 def classify(
     panes: list[Pane],
     sessions: list[Session],
@@ -594,11 +614,11 @@ def shown_session(
 def assign_owners(
     hosts: list[Host],
     sessions: list[Session],
-    shown: dict[int, str | None],
-    memories: dict[int, HostMemory],
-    owners: dict[str, int],
+    shown: dict[PaneKey, str | None],
+    memories: dict[PaneKey, HostMemory],
+    owners: dict[str, PaneKey],
     scope: str,
-) -> dict[str, int]:
+) -> dict[str, PaneKey]:
     """The one host pane each background session is listed in.
 
     Every client could list every background session, so a session listed by each pane it could
@@ -608,21 +628,17 @@ def assign_owners(
     working nearest above its directory, the lowest pane on a tie; with `scope = "all"`, to the
     lowest pane when none contains it.
     """
-    panes = sorted(host.pane.pane_id for host in hosts)
-    by_pane = {host.pane.pane_id: host for host in hosts}
+    panes = sorted(host.pane.key for host in hosts)
+    by_pane = {host.pane.key: host for host in hosts}
     assigned = {}
     for session in sessions:
         if session.kind != "background":
             continue
         session_id = session.session_id
-        owner = next((pane_id for pane_id in panes if shown.get(pane_id) == session_id), None)
+        owner = next((key for key in panes if shown.get(key) == session_id), None)
         if owner is None:
             owner = next(
-                (
-                    pane_id
-                    for pane_id in panes
-                    if session_id in memories.get(pane_id, HostMemory()).moved
-                ),
+                (key for key in panes if session_id in memories.get(key, HostMemory()).moved),
                 None,
             )
         if owner is None and owners.get(session_id) in by_pane:
@@ -634,16 +650,16 @@ def assign_owners(
     return assigned
 
 
-def nearest_pane(session: Session, hosts: list[Host], scope: str) -> int | None:
+def nearest_pane(session: Session, hosts: list[Host], scope: str) -> PaneKey | None:
     containing = [host for host in hosts if is_under(session.cwd, host.pane.cwd)]
     if containing:
         nearest = min(
             containing,
-            key=lambda host: (-len(os.path.normpath(host.pane.cwd or "")), host.pane.pane_id),
+            key=lambda host: (-len(os.path.normpath(host.pane.cwd or "")), host.pane.key),
         )
-        return nearest.pane.pane_id
+        return nearest.pane.key
     if scope == "all" and hosts:
-        return min(host.pane.pane_id for host in hosts)
+        return min(host.pane.key for host in hosts)
     return None
 
 
@@ -653,7 +669,7 @@ def host_rows(
     scope: str,
     memory: HostMemory,
     label: str | None,
-    owners: dict[str, int] | None = None,
+    owners: dict[str, PaneKey] | None = None,
 ) -> list[dict[str, object]]:
     """The rows a host pane publishes, or none when it has nothing a single row could not say.
 
@@ -673,7 +689,7 @@ def host_rows(
             session
             for session in listed_sessions(host, sessions, "all")
             if session.kind != "background"
-            or owners.get(session.session_id) == host.pane.pane_id
+            or owners.get(session.session_id) == host.pane.key
         ]
     running = {session.session_id for session in listed}
     for session_id, session in list(memory.displaced.items()):
@@ -966,7 +982,11 @@ class Cli:
         self.run([self.settings.claude, "stop", session.short_id])
 
     def panes(self) -> list[Pane]:
-        return parse_panes(self.run([ROZI, "list-panes", "--format", "json"]))
+        # Every attached session's panes, so a session's rows stay current while another is on
+        # screen.
+        return parse_panes(
+            self.run([ROZI, "list-panes", "--scope", "attached", "--format", "json"])
+        )
 
     def screen_text(self, pane_id: int) -> str:
         data = response_data(
@@ -1227,13 +1247,13 @@ class SessionsService:
         self.settings = settings
         self.cli = cli or Cli(settings)
         self.messages: queue.Queue[tuple[object, ...]] = queue.Queue()
-        self.publishers: dict[int, Publisher] = {}
-        self.memory: dict[int, HostMemory] = {}
+        self.publishers: dict[PaneKey, Publisher] = {}
+        self.memory: dict[PaneKey, HostMemory] = {}
         # The pane each background session is listed in, kept between polls; see `assign_owners`.
-        self.owners: dict[str, int] = {}
-        self.hosts: dict[int, Host] = {}
+        self.owners: dict[str, PaneKey] = {}
+        self.hosts: dict[PaneKey, Host] = {}
         # The session name each attached client showed when last read, to notice a switch.
-        self.labels: dict[int, str | None] = {}
+        self.labels: dict[PaneKey, str | None] = {}
         self.next_token = 1
         self.reported_error: str | None = None
         # Whether rozi's hook plugin is installed, checked once a run; `None` until then, and when
@@ -1242,12 +1262,18 @@ class SessionsService:
         self.hooks_checked = False
         self.hooks_noticed = False
 
-    def start_publisher(self, pane_id: int) -> Publisher:
+    def start_publisher(self, key: PaneKey) -> Publisher:
         token = self.next_token
         self.next_token += 1
         environment = os.environ.copy()
-        # `ROZI_PANE` names the pane a publish stream belongs to.
+        # These name the pane a publish stream belongs to, and it stays with that session's pane
+        # whichever session is on screen.
+        instance, pane_id = key
         environment["ROZI_PANE"] = str(pane_id)
+        if instance:
+            environment["ROZI_SESSION_INSTANCE"] = instance
+        else:
+            environment.pop("ROZI_SESSION_INSTANCE", None)
         # `--kind agent`: each row is a Claude conversation, so rozi's Agents tab and picker list it
         # with the other agents, not only among the Activity rows.
         process = subprocess.Popen(
@@ -1260,22 +1286,22 @@ class SessionsService:
             env=environment,
         )
         publisher = Publisher(token=token, process=process)
-        self.publishers[pane_id] = publisher
+        self.publishers[key] = publisher
 
         def read() -> None:
             assert process.stdout is not None
             for line in process.stdout:
                 row_id = activation(line)
                 if row_id is not None:
-                    self.messages.put(("activate", pane_id, token, row_id))
+                    self.messages.put(("activate", key, token, row_id))
             process.wait()
-            self.messages.put(("closed", pane_id, token))
+            self.messages.put(("closed", key, token))
 
         threading.Thread(target=read, name=f"publish-{pane_id}", daemon=True).start()
         return publisher
 
-    def stop_publisher(self, pane_id: int) -> None:
-        publisher = self.publishers.pop(pane_id, None)
+    def stop_publisher(self, key: PaneKey) -> None:
+        publisher = self.publishers.pop(key, None)
         if publisher is None:
             return
         try:
@@ -1288,13 +1314,13 @@ class SessionsService:
         except subprocess.TimeoutExpired:
             publisher.process.kill()
 
-    def publish(self, pane_id: int, rows: list[dict[str, object]]) -> None:
-        memory = self.memory.setdefault(pane_id, HostMemory())
-        publisher = self.publishers.get(pane_id)
+    def publish(self, key: PaneKey, rows: list[dict[str, object]]) -> None:
+        memory = self.memory.setdefault(key, HostMemory())
+        publisher = self.publishers.get(key)
         if publisher is None:
             if not rows:
                 return
-            publisher = self.start_publisher(pane_id)
+            publisher = self.start_publisher(key)
             memory.published = None
         if memory.published == rows:
             return
@@ -1303,23 +1329,30 @@ class SessionsService:
             write_line(publisher.process.stdin, {"rows": rows})
             memory.published = rows
         except (BrokenPipeError, OSError):
-            # The pane went away or the UI moved to another session. Try again next poll.
-            self.stop_publisher(pane_id)
+            # The pane or its session went away. Try again next poll.
+            self.stop_publisher(key)
 
     def poll(self) -> None:
         sessions = self.cli.sessions()
-        hosts = {host.pane.pane_id: host for host in classify(self.cli.panes(), sessions)}
+        hosts = {host.pane.key: host for host in classify(self.cli.panes(), sessions)}
         self.hosts = hosts
-        for pane_id in set(self.publishers) - set(hosts):
-            self.stop_publisher(pane_id)
-        for pane_id in set(self.memory) - set(hosts):
-            del self.memory[pane_id]
-        labels: dict[int, str | None] = {}
-        for host in hosts.values():
-            memory = self.memory.setdefault(host.pane.pane_id, HostMemory())
+        # A pane is gone when no attached session lists it. A session off screen is still listed.
+        for key in set(self.publishers) - set(hosts):
+            self.stop_publisher(key)
+        for key in set(self.memory) - set(hosts):
+            del self.memory[key]
+        labels: dict[PaneKey, str | None] = {}
+        for key, host in hosts.items():
+            memory = self.memory.setdefault(key, HostMemory())
             label = None
-            memory.working = None
             now = int(time.time() * 1000)
+            if host.interactive is None and not host.pane.on_screen:
+                # A screen can be read only while its session is on screen. Until it is back, the
+                # client is taken to show what it showed at the last look.
+                labels[key] = self.labels.get(key)
+                follow_moved(memory, host, sessions, now)
+                continue
+            memory.working = None
             if host.interactive is None:
                 try:
                     shown = self.cli.screen_text(host.pane.pane_id)
@@ -1328,26 +1361,25 @@ class SessionsService:
                     memory.look(text_agent_view(shown), now)
                 except SessionsError:
                     label = None
-            labels[host.pane.pane_id] = label
-            if memory.pending is not None:
+            labels[key] = label
+            if memory.pending is not None and host.pane.on_screen:
                 try:
                     follow_pending(self.cli, memory, now)
                 except SessionsError:
                     pass
             follow_moved(memory, host, sessions, now)
         shown = {
-            pane_id: shown_session(host, sessions, self.memory[pane_id], labels[pane_id])
-            for pane_id, host in hosts.items()
+            key: shown_session(host, sessions, self.memory[key], labels[key])
+            for key, host in hosts.items()
         }
         self.owners = assign_owners(
             list(hosts.values()), sessions, shown, self.memory, self.owners, self.settings.scope
         )
-        for pane_id, host in hosts.items():
+        for key, host in hosts.items():
             rows = host_rows(
-                host, sessions, self.settings.scope, self.memory[pane_id], labels[pane_id],
-                self.owners,
+                host, sessions, self.settings.scope, self.memory[key], labels[key], self.owners
             )
-            self.publish(pane_id, rows)
+            self.publish(key, rows)
         self.offer_hooks(claude_in_use=bool(hosts))
 
     def offer_hooks(self, claude_in_use: bool) -> None:
@@ -1371,14 +1403,15 @@ class SessionsService:
             self.hooks_noticed = True
             self.cli.notify(HOOKS_NOTICE)
 
-    def activate(self, pane_id: int, row_id: str) -> None:
-        host = self.hosts.get(pane_id)
-        if host is None:
+    def activate(self, key: PaneKey, row_id: str) -> None:
+        host = self.hosts.get(key)
+        # Pane ids repeat across sessions, and switching types into the pane the id names now.
+        if host is None or not host.pane.on_screen:
             return
         if not self.settings.switching:
             self.cli.notify("Switch to this session in Claude with ←, or with /resume.")
             return
-        memory = self.memory.setdefault(pane_id, HostMemory())
+        memory = self.memory.setdefault(key, HostMemory())
         try:
             switch(self.cli, host, row_id, memory)
         except SessionsError as error:
@@ -1398,15 +1431,15 @@ class SessionsService:
         if kind == "stop":
             return False
         if kind == "closed":
-            pane_id, token = message[1], message[2]
-            current = self.publishers.get(pane_id)  # type: ignore[arg-type]
+            key, token = message[1], message[2]
+            current = self.publishers.get(key)  # type: ignore[arg-type]
             if current is not None and current.token == token:
-                self.publishers.pop(pane_id)  # type: ignore[arg-type]
+                self.publishers.pop(key)  # type: ignore[arg-type]
         elif kind == "activate":
-            pane_id, token, row_id = message[1], message[2], message[3]
-            current = self.publishers.get(pane_id)  # type: ignore[arg-type]
+            key, token, row_id = message[1], message[2], message[3]
+            current = self.publishers.get(key)  # type: ignore[arg-type]
             if current is not None and current.token == token:
-                self.activate(pane_id, str(row_id))  # type: ignore[arg-type]
+                self.activate(key, str(row_id))  # type: ignore[arg-type]
         return True
 
     def label_changed(self) -> bool:
@@ -1416,26 +1449,28 @@ class SessionsService:
         Claude lists a session in `claude agents --json` only moments after the client opens it, but
         the client names it at once. A client running its own conversation shows no label, and is
         left to the poll."""
-        labels: dict[int, str | None] = {}
+        labels: dict[PaneKey, str | None] = {}
         browsing_changed = False
         now = int(time.time() * 1000)
-        for pane_id, host in self.hosts.items():
+        for key, host in self.hosts.items():
             if host.interactive is not None:
                 continue
-            try:
-                shown = self.cli.screen_text(pane_id)
-            except SessionsError:
-                labels[pane_id] = self.labels.get(pane_id)
+            if not host.pane.on_screen:
+                labels[key] = self.labels.get(key)
                 continue
-            labels[pane_id] = text_label(shown)
-            memory = self.memory.get(pane_id)
+            try:
+                shown = self.cli.screen_text(host.pane.pane_id)
+            except SessionsError:
+                labels[key] = self.labels.get(key)
+                continue
+            labels[key] = text_label(shown)
+            memory = self.memory.get(key)
             if memory is not None:
                 browsing = text_agent_view(shown)
                 browsing_changed |= browsing != memory.browsing
                 memory.look(browsing, now)
         changed = any(
-            pane_id in self.labels and label != self.labels[pane_id]
-            for pane_id, label in labels.items()
+            key in self.labels and label != self.labels[key] for key, label in labels.items()
         )
         self.labels = labels
         return changed or browsing_changed
@@ -1461,8 +1496,8 @@ class SessionsService:
                     break
 
     def close(self) -> None:
-        for pane_id in list(self.publishers):
-            self.stop_publisher(pane_id)
+        for key in list(self.publishers):
+            self.stop_publisher(key)
 
 
 def activation(line: str) -> str | None:

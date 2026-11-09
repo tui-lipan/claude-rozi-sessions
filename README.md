@@ -10,9 +10,9 @@ client to that conversation.
 
 ## Requirements
 
-- rozi 0.0.36 or newer
+- rozi 0.0.40 or newer, on the client and on every host you attach sessions on
 - Claude Code 2.1.285 or newer, for `claude agents --json` and `/resume` of a background session
-- Python 3 available as `python`
+- Python 3 available as `python`, and `claude`, on each host that runs Claude Code
 - Linux or macOS. See [Limits](#limits).
 
 ## Install
@@ -201,8 +201,9 @@ clients in several panes for different projects.
 
 - **Windows.** rozi reports no foreground process group there, and Python cannot read one, so no
   pane is recognised as a Claude client. Rows are not published.
-- **Remote panes.** rozi omits the foreground process group for a remote attachment, whose
-  processes are on another machine, so those panes are left alone.
+- **Remote panes.** The service runs on each host with an attached session and lists that host's
+  Claude Code sessions. A rozi client older than 0.0.44 tells it no process of a remote session's
+  panes, so on such a client the panes of a remote session are left alone.
 - **Sessions of other repositories** are listed with `scope = "all"` but cannot be switched to from
   this pane, because Claude resumes only its own repository's sessions. Use `scope = "cwd"` to
   list only the pane's own.
@@ -216,9 +217,12 @@ clients in several panes for different projects.
   active, and `rozi agents prompt` and `read` refuse to target any of the pane's sessions.
 - Switching reads Claude's screen. A future Claude release that redraws its prompt differently
   makes the extension refuse to switch rather than guess.
-- The service runs only while a rozi client with the extension is attached. With a rozi newer
-  than 0.0.29, it also exits on its own when that client is killed. Its errors go to a stream rozi
-  discards, so a missing `claude` shows up as no rows rather than as a message.
+- The service runs on a host only while a rozi client with the extension has a session attached
+  there. It keeps the rows of every session attached on its host current, on screen or not, but
+  types into and reads the screen of a Claude client only while its session is on screen, so the
+  active row of a client off screen is the one it showed at the last look. The service exits on
+  its own when that client is gone. A missing `claude` shows up as no rows; run
+  `rozi extensions logs claude-rozi-sessions` on that host to see why.
 
 ## Development
 
