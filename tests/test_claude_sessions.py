@@ -537,14 +537,13 @@ class ScreenTests(unittest.TestCase):
         self.assertIsNone(screen.composer)
         self.assertIn("dialog", cs.switch_refusal(screen).message)
 
-    def test_claudes_session_list_accepts_a_switch_command(self) -> None:
+    def test_claudes_session_list_refuses_a_switch_command(self) -> None:
         # Claude draws this placeholder grey like the `❯`, not dim.
         screen = cs.read_screen(session_list())
         self.assertTrue(screen.agent_view)
         self.assertFalse(screen.draft)
-        self.assertIsNone(cs.switch_refusal(screen))
-        typed = session_list([{"text": "❯ fix it"}])
-        self.assertIn("unsent text", cs.switch_refusal(cs.read_screen(typed)).message)
+        # Claude 2.1 answers `/resume` there with "/resume isn't available in agent view".
+        self.assertIn("session list", cs.switch_refusal(screen).message)
 
     def test_a_running_turn_does_not_stop_a_switch(self) -> None:
         # Claude holds a command sent mid-turn until the turn ends, so nothing is cut short.
@@ -1195,13 +1194,15 @@ class UnnamedConversationTests(unittest.TestCase):
         self.rows(moved)
         self.assertEqual(self.memory.unnamed, "fresh-id")
         self.memory.look(False, now_ms=1_500)
-        # The row keeps the conversation's first id.
+        # Without a prompt the first id has no transcript: the first prompt starts one under the
+        # new id, the only one Claude resumes the conversation by. The row takes it.
         self.assertEqual(
             self.rows(moved, now_ms=2_000),
-            [("stale-id", "New session", False), ("own-id", "New session", True)],
+            [("stale-id", "New session", False), ("fresh-id", "New session", True)],
         )
+        self.assertEqual(self.memory.moved, {})
         cli = FakeCli(moved, [prompt()])
-        self.assertTrue(cs.switch(cli, self.host, "own-id", self.memory, sleep=lambda _: None))
+        self.assertTrue(cs.switch(cli, self.host, "fresh-id", self.memory, sleep=lambda _: None))
         self.assertEqual(actions(cli), [])
 
     def test_a_session_appearing_long_after_the_session_list_is_not_claimed(self) -> None:
@@ -1218,11 +1219,102 @@ class UnnamedConversationTests(unittest.TestCase):
 
     def test_a_session_with_no_prompt_is_never_stopped_to_resume_it(self) -> None:
         listed = sessions(self.stale, self.fresh)
-        cli = FakeCli(listed, [session_list()])
+        cli = FakeCli(listed, [prompt()])
         self.assertFalse(cs.switch(cli, self.host, "fresh-id", self.memory, sleep=lambda _: None))
         ((kind, message),) = actions(cli)
         self.assertEqual(kind, "notify")
         self.assertIn("no prompt yet", message)
+
+
+class TitledByScreenTests(unittest.TestCase):
+    """A conversation sent to the background before its first prompt stays listed by Claude under
+    its id after that prompt. Only the terminal title of the client showing it names it. Polls as
+    Claude Code 2.1 answered them in a live client."""
+
+    def setUp(self) -> None:
+        test = self
+
+        class ScriptCli(FakeCli):
+            def panes(self):
+                return [replace(host_pane(1, pid=500), title=test.title)]
+
+            def screen_text(self, pane_id):
+                return test.screen
+
+        self.cli = ScriptCli([], [])
+        self.service = cs.SessionsService(cs.Settings(), cli=self.cli)
+        self.service.hooks_checked, self.service.hooks_present = True, True
+        self.published = {}
+        self.service.publish = lambda pane, rows: self.published.__setitem__(pane, rows)
+        self.list_screen = "\n".join(row_text(row) for row in session_list())
+        self.conversation = "\n".join(row_text(row) for row in prompt())
+
+    def poll(self, listed, title, screen):
+        self.cli.listed, self.title, self.screen = sessions(*listed), title, screen
+        self.service.poll()
+        return [
+            (row["id"], row["title"], row["status"], row["active"])
+            for row in self.published.get(key(1), [])
+        ]
+
+    def test_the_first_prompt_titles_the_row_and_lets_it_be_switched_to(self) -> None:
+        own = session("own-id", kind="interactive", pid=500, name="rozi-fc", started=1)
+        fresh = session("fresh-id", pid=900, state="blocked", name="fresh-id", started=2)
+        self.assertEqual(self.poll([own], "Claude Code", self.conversation), [])
+        # ← opens Claude's session list, which titles the terminal after itself.
+        self.assertEqual(
+            self.poll([fresh], "1 awaiting input · claude agents", self.list_screen),
+            [("fresh-id", "New session", "idle", False)],
+        )
+        # Enter returns to the conversation, which Claude calls the current session.
+        self.assertEqual(
+            self.poll([fresh], "current session", self.conversation),
+            [("fresh-id", "New session", "idle", True)],
+        )
+        answered = replace_entry(fresh, state="done")
+        self.assertEqual(
+            self.poll([answered], "✳ Ok", self.conversation),
+            [("fresh-id", "Ok", "done", True)],
+        )
+        # The title stays with the conversation once the client shows something else.
+        self.assertEqual(
+            self.poll([answered], "claude agents", self.list_screen),
+            [("fresh-id", "Ok", "done", False)],
+        )
+        # From the list, Claude would refuse `/resume`, so nothing is stopped or typed.
+        self.cli.screens = [session_list()]
+        host, memory = self.service.hosts[key(1)], self.service.memory[key(1)]
+        self.assertFalse(cs.switch(self.cli, host, "fresh-id", memory, sleep=lambda _: None))
+        self.assertEqual([kind for kind, *_ in actions(self.cli)], ["notify"])
+        # It has a transcript now, under its own id, so from another conversation its row
+        # switches to it.
+        other = session("other-id", pid=901, name="other work", started=3)
+        self.assertEqual(
+            self.poll([answered, other], "✳ other work", showing("other work")),
+            [("fresh-id", "Ok", "done", False), ("other-id", "other work", "done", True)],
+        )
+        self.cli.calls.clear()
+        self.cli.screens = [prompt(label="other work"),
+                            prompt(typed="/resume fresh-id", label="other work")]
+        cs.switch(self.cli, host, "fresh-id", memory, sleep=lambda _: None)
+        self.assertEqual(
+            actions(self.cli)[:3],
+            [("type", "/resume fresh-id"), ("stop", "fresh-id"), ("press", "Enter")],
+        )
+
+    def test_titles_that_name_no_conversation_are_not_taken(self) -> None:
+        for title in ("Claude Code", "current session", "claude agents",
+                      "2 awaiting input · claude agents", "✳ ", None):
+            self.assertIsNone(cs.conversation_title(title), title)
+        self.assertEqual(cs.conversation_title("✳ Fix the login"), "Fix the login")
+
+
+def replace_entry(entry: dict[str, object], **changes: object) -> dict[str, object]:
+    return {**entry, **changes}
+
+
+def row_text(row: list[dict[str, object]]) -> str:
+    return "".join(str(span.get("text", "")) for span in row)
 
 
 class ServiceTests(unittest.TestCase):

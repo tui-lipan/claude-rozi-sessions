@@ -51,8 +51,10 @@ foreground process group. The client is in one of two modes:
   it is the one whose turn runs exactly while the client's screen shows a turn running, and it
   stays the active row after its turn ends until something else says otherwise. Claude shows no
   name for a session waiting for its first prompt, so when ← sends such a conversation to the
-  background, its "New session" row is the active row whenever the client returns to it. While the
-  client shows Claude's session list, no row is active.
+  background, its "New session" row is the active row whenever the client returns to it. Claude
+  keeps listing that conversation by its ID after its first prompt, so its row takes the title
+  Claude puts on the terminal while the client shows it. While the client shows Claude's session
+  list, no row is active.
 
 Background sessions are listed too, each with the directory it works in, so rozi groups it by
 that directory's project and branch. Interactive sessions in other terminals are listed where they
@@ -144,6 +146,8 @@ The extension does not switch, and says why in a rozi notification, when:
 
 - Claude's prompt holds unsent text. Claude's placeholder text does not count.
 - Claude is showing a question, an approval dialog, or any screen without its prompt.
+- Claude is showing its session list, where it does not run `/resume`. Open the session there, or
+  press Esc to return to a conversation first.
 - From an attached client, the selected session is still working. Stopping it would cut its turn
   short.
 - The selected session works in another repository than the Claude client. Claude's `/resume`
