@@ -9,8 +9,8 @@ answers a row activation by switching the client to that conversation through Cl
 `/resume` command.
 
 Everything goes through public interfaces: `claude agents --json`, `claude stop`,
-`claude plugin list --json`, `git rev-parse`, and rozi's `list-panes`, `capture-pane`, `send-text`, `send-keys`,
-`notify`, and `publish`.
+`git rev-parse`, and rozi's `list-panes`, `capture-pane`, `send-text`, `send-keys`, `notify`, and
+`publish`.
 """
 
 from __future__ import annotations
@@ -35,16 +35,6 @@ COMMAND_TIMEOUT = 5.0
 # How often an attached client's screen is read between polls, so that a switch made in Claude
 # shows up at once.
 LABEL_INTERVAL = 0.5
-# rozi's Claude Code plugin: its hooks report the live state of the conversation a client shows.
-HOOKS_PLUGIN = "rozi"
-# The palette command that installs it. Hidden by the manifest, and listed only while the plugin
-# is missing.
-INSTALL_HOOKS_COMMAND = "install-hooks"
-HOOKS_MARKETPLACE = "tui-lipan/rozi"
-HOOKS_NOTICE = (
-    "For live status of the conversation on screen, install rozi's Claude Code hooks: run "
-    "“Install Claude Code hooks” from the command palette. suggest_hooks = false hides this."
-)
 # How long to wait for Claude to show the selected session after `/resume`: Claude resumes a
 # conversation in a second or two, and a stopped one can take longer to load.
 CONFIRM_ATTEMPTS = 20
@@ -112,7 +102,6 @@ class Settings:
     poll_seconds: float = 2.0
     scope: str = "all"
     switching: bool = True
-    suggest_hooks: bool = True
 
     @classmethod
     def from_environment(cls, environ: dict[str, str]) -> Settings:
@@ -125,7 +114,6 @@ class Settings:
         claude = values.get("claude")
         scope = values.get("scope")
         switching = values.get("switching")
-        suggest_hooks = values.get("suggest_hooks")
         try:
             poll = float(values.get("poll_seconds", cls.poll_seconds))
         except (TypeError, ValueError):
@@ -135,9 +123,6 @@ class Settings:
             poll_seconds=min(max(poll, 0.5), 60.0),
             scope=scope if scope in {"all", "cwd"} else cls.scope,
             switching=switching if isinstance(switching, bool) else cls.switching,
-            suggest_hooks=(
-                suggest_hooks if isinstance(suggest_hooks, bool) else cls.suggest_hooks
-            ),
         )
 
 
@@ -347,6 +332,9 @@ class HostMemory:
     # Where each published row sorts: when its conversation started, as first seen. A
     # conversation resumed in another worker reports that worker's start, which must not move it.
     places: dict[str, int] = field(default_factory=dict)
+    # The client's own conversation, if a turn has run in it since this service first saw it.
+    # Claude lists that conversation only as busy, waiting, or idle, never as done.
+    turned: str | None = None
 
     def look(self, browsing: bool, now_ms: int) -> None:
         """Note whether the client shows Claude's session list now."""
@@ -357,6 +345,15 @@ class HostMemory:
     def origin(self, session: Session) -> Session:
         """The conversation `session`'s row was first published for."""
         return self.moved.get(session.session_id, session)
+
+    def turn_state(self, own: Session) -> Session:
+        """The client's own conversation, `done` once a turn has ended in it and until the next
+        one starts. Claude says only that it is idle."""
+        if own.status in {"busy", "waiting"}:
+            self.turned = own.session_id
+        elif own.status == "idle" and self.turned == own.session_id:
+            return replace(own, state="done")
+        return own
 
     def titled(self, session: Session) -> Session:
         """`session` under the title the client's terminal gave it, if Claude lists it by ID."""
@@ -445,21 +442,6 @@ def parse_sessions(output: str) -> list[Session]:
     if not isinstance(data, list):
         raise SessionsError("claude agents --json returned a non-list payload")
     return [session for item in data if (session := Session.from_wire(item)) is not None]
-
-
-def has_hooks_plugin(output: str) -> bool:
-    """Whether `claude plugin list --json` lists rozi's plugin, from any marketplace, enabled or
-    not: a disabled one was turned off on purpose."""
-    try:
-        data = json.loads(output)
-    except json.JSONDecodeError as error:
-        raise SessionsError("claude plugin list --json returned invalid JSON") from error
-    if not isinstance(data, list):
-        raise SessionsError("claude plugin list --json returned a non-list payload")
-    return any(
-        isinstance(item, dict) and (text(item.get("id")) or "").split("@")[0] == HOOKS_PLUGIN
-        for item in data
-    )
 
 
 def response_data(output: str, command: str) -> Any:
@@ -741,10 +723,8 @@ def host_rows(
     label: str | None,
     owners: dict[str, PaneKey] | None = None,
 ) -> list[dict[str, object]]:
-    """The rows a host pane publishes, or none when it has nothing a single row could not say.
-
-    A client running only its own conversation is one agent, which rozi already shows; the hooks
-    or screen detection speak for it better than a two-second poll.
+    """The rows a host pane publishes: the client's own conversation, when it runs one, and the
+    background sessions it lists.
 
     With `owners`, from `assign_owners`, the pane lists only the background sessions it owns, and
     the owners already say which sessions the scope leaves out.
@@ -753,6 +733,8 @@ def host_rows(
     renumbers them: rozi names a pane's rows by position.
     """
     sessions = [memory.titled(session) for session in sessions]
+    if host.interactive is not None:
+        host = replace(host, interactive=memory.turn_state(host.interactive))
     if owners is None:
         listed = listed_sessions(host, sessions, scope)
     else:
@@ -771,8 +753,6 @@ def host_rows(
         replace(session, stopped=True, kind="background") for session in memory.displaced.values()
     ]
     everything = listed + displaced
-    if host.interactive is not None and len(everything) < 2:
-        return []
     def place(session: Session) -> tuple[int, str]:
         origin = memory.origin(session)
         return memory.places.setdefault(origin.session_id, origin.started_at), origin.session_id
@@ -1040,16 +1020,6 @@ class Cli:
         except SessionsError:
             return None
         return text(output)
-
-    def hooks_installed(self) -> bool:
-        return has_hooks_plugin(self.run([self.settings.claude, "plugin", "list", "--json"]))
-
-    def offer_command(self, command: str, offered: bool) -> None:
-        """List or unlist one of this extension's commands in rozi's command palette."""
-        try:
-            self.run([ROZI, "show-command" if offered else "hide-command", command])
-        except SessionsError:
-            pass
 
     def stop(self, session: Session) -> None:
         self.run([self.settings.claude, "stop", session.short_id])
@@ -1335,11 +1305,6 @@ class SessionsService:
         self.labels: dict[PaneKey, str | None] = {}
         self.next_token = 1
         self.reported_error: str | None = None
-        # Whether rozi's hook plugin is installed, checked once a run; `None` until then, and when
-        # Claude cannot say.
-        self.hooks_present: bool | None = None
-        self.hooks_checked = False
-        self.hooks_noticed = False
 
     def start_publisher(self, key: PaneKey) -> Publisher:
         token = self.next_token
@@ -1500,28 +1465,6 @@ class SessionsService:
                 host, sessions, self.settings.scope, self.memory[key], labels[key], self.owners
             )
             self.publish(key, rows)
-        self.offer_hooks(claude_in_use=bool(hosts))
-
-    def offer_hooks(self, claude_in_use: bool) -> None:
-        """Once a run, list the install command if rozi's hook plugin is missing, and point it out
-        the first time Claude is in use."""
-        if not self.hooks_checked:
-            self.hooks_checked = True
-            try:
-                self.hooks_present = self.cli.hooks_installed()
-            except SessionsError:
-                # An older Claude without `plugin list --json`: nothing reliable to offer.
-                self.hooks_present = None
-            if self.hooks_present is False:
-                self.cli.offer_command(INSTALL_HOOKS_COMMAND, True)
-        if (
-            claude_in_use
-            and self.hooks_present is False
-            and self.settings.suggest_hooks
-            and not self.hooks_noticed
-        ):
-            self.hooks_noticed = True
-            self.cli.notify(HOOKS_NOTICE)
 
     def activate(self, key: PaneKey, row_id: str) -> None:
         host = self.hosts.get(key)

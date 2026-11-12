@@ -249,10 +249,29 @@ class ClassifyTests(unittest.TestCase):
 
 
 class RowTests(unittest.TestCase):
-    def test_a_client_alone_with_its_own_conversation_publishes_nothing(self) -> None:
-        listed = sessions(session("own", kind="interactive", pid=500))
-        (host,) = cs.classify([pane()], listed, group_of=lambda pid: pid)
-        self.assertEqual(cs.host_rows(host, listed, "all", cs.HostMemory(), None), [])
+    def test_the_clients_own_conversation_is_done_once_a_turn_ends_in_it(self) -> None:
+        memory = cs.HostMemory()
+
+        def own_row(status: str, sid: str = "own", reason: str | None = None):
+            value = {**session(sid, kind="interactive", pid=500), "status": status}
+            if reason:
+                value["waitingFor"] = reason
+            listed = sessions(value)
+            (host,) = cs.classify([pane()], listed, group_of=lambda pid: pid)
+            (row,) = cs.host_rows(host, listed, "all", memory, None)
+            return row["id"], row["status"], row.get("reason")
+
+        # Claude lists it busy, waiting, or idle only: idle is `done` once a turn has run.
+        self.assertEqual(own_row("idle"), ("own", "idle", None))
+        self.assertEqual(own_row("busy"), ("own", "working", None))
+        self.assertEqual(
+            own_row("waiting", reason="permission prompt"),
+            ("own", "blocked", "Permission prompt"),
+        )
+        self.assertEqual(own_row("idle"), ("own", "done", None))
+        self.assertEqual(own_row("busy"), ("own", "working", None))
+        # `/clear` starts another conversation, in which no turn has run yet.
+        self.assertEqual(own_row("idle", sid="cleared"), ("cleared", "idle", None))
 
     def test_rows_run_oldest_first_with_the_clients_own_conversation_active(self) -> None:
         listed = sessions(
@@ -397,7 +416,7 @@ class OwnershipTests(unittest.TestCase):
         hosts = cs.classify([host_pane(1), host_pane(2), host_pane(3)], listed,
                             group_of=lambda pid: pid)
         _, rows = owned_rows(hosts, listed)
-        self.assertEqual(rows, {1: ["bg", "one"], 2: [], 3: []})
+        self.assertEqual(rows, {1: ["bg", "one"], 2: ["two"], 3: ["three"]})
 
     def test_the_client_attached_to_a_session_lists_it(self) -> None:
         listed = sessions(session("bg", name="docs"), session("other", name="other"),
@@ -445,12 +464,11 @@ class OwnershipTests(unittest.TestCase):
                 return [host_pane(1), host_pane(2)]
 
         service = cs.SessionsService(cs.Settings(), cli=PollCli(listed, []))
-        service.hooks_checked, service.hooks_present = True, True
         published = {}
         service.publish = lambda pane, rows: published.__setitem__(
             pane, [row["id"] for row in rows])
         service.poll()
-        self.assertEqual(published, {key(1): ["bg", "one"], key(2): []})
+        self.assertEqual(published, {key(1): ["bg", "one"], key(2): ["two"]})
 
     def test_a_pane_is_known_by_its_session_as_well_as_its_id(self) -> None:
         wire = {"id": 3, "foreground_program": "claude", "on_screen": False,
@@ -470,7 +488,6 @@ class OwnershipTests(unittest.TestCase):
                 return [here, away]
 
         service = cs.SessionsService(cs.Settings(), cli=PollCli(listed, []))
-        service.hooks_checked, service.hooks_present = True, True
         published = {}
         service.publish = lambda pane, rows: published.__setitem__(
             pane, [row["id"] for row in rows])
@@ -490,7 +507,6 @@ class OwnershipTests(unittest.TestCase):
                 raise AssertionError("a session off screen has no screen to read")
 
         service = cs.SessionsService(cs.Settings(), cli=OffScreenCli(listed, []))
-        service.hooks_checked, service.hooks_present = True, True
         # The client showed "bg" at the last look, while its session was on screen.
         service.labels[key(1, "local")] = "bg"
         published = {}
@@ -522,7 +538,6 @@ class OwnershipTests(unittest.TestCase):
 
         cli = PollCli(sessions(own, before), [], after=showing("Old topic"))
         service = cs.SessionsService(cs.Settings(), cli=cli)
-        service.hooks_checked, service.hooks_present = True, True
         published = {}
         service.publish = lambda pane_key, rows: published.__setitem__(
             pane_key, [(row["id"], row["title"], row["status"], row["active"]) for row in rows])
@@ -537,7 +552,7 @@ class OwnershipTests(unittest.TestCase):
         cli.title = "✳ Resumed topic"
         cli.after = [f"● reply\n{RULE}\n❯\n{RULE}\n  esc to interrupt"]
         service.poll()
-        self.assertEqual(published[key(1)], [])
+        self.assertEqual(published[key(1)], [("own", "", "idle", True)])
         self.assertEqual(
             published[key(2)],
             [("old-conversation", "Old topic", "done", False), ("resumed", "Resumed topic", "working", True)],
@@ -630,9 +645,6 @@ class FakeCli:
 
     def repository(self, path):
         return self.repositories.get(path)
-
-    def offer_command(self, command, offered):
-        self.calls.append(("offer", command, offered))
 
     def type_text(self, pane_id, value):
         self.calls.append(("type", value))
@@ -1276,7 +1288,6 @@ class TitledByScreenTests(unittest.TestCase):
 
         self.cli = ScriptCli([], [])
         self.service = cs.SessionsService(cs.Settings(), cli=self.cli)
-        self.service.hooks_checked, self.service.hooks_present = True, True
         self.published = {}
         self.service.publish = lambda pane, rows: self.published.__setitem__(pane, rows)
         self.list_screen = "\n".join(row_text(row) for row in session_list())
@@ -1293,7 +1304,10 @@ class TitledByScreenTests(unittest.TestCase):
     def test_the_first_prompt_titles_the_row_and_lets_it_be_switched_to(self) -> None:
         own = session("own-id", kind="interactive", pid=500, name="rozi-fc", started=1)
         fresh = session("fresh-id", pid=900, state="blocked", name="fresh-id", started=2)
-        self.assertEqual(self.poll([own], "Claude Code", self.conversation), [])
+        self.assertEqual(
+            self.poll([own], "Claude Code", self.conversation),
+            [("own-id", "New session", "idle", True)],
+        )
         # ← opens Claude's session list, which titles the terminal after itself.
         self.assertEqual(
             self.poll([fresh], "1 awaiting input · claude agents", self.list_screen),
@@ -1485,188 +1499,6 @@ class ClientWatchTests(unittest.TestCase):
         self.assertEqual(queued, [("client",)])
         refused, _ = watch("echo 'unknown event' >&2; exit 1")
         self.assertEqual(refused, [])
-
-
-class HooksTests(unittest.TestCase):
-    """The offer to install rozi's Claude Code hook plugin."""
-
-    def test_rozis_plugin_is_found_from_any_marketplace_enabled_or_not(self) -> None:
-        def listed(*entries: dict[str, object]) -> bool:
-            return cs.has_hooks_plugin(json.dumps(list(entries)))
-
-        self.assertTrue(listed({"id": "rozi@rozi", "enabled": True}))
-        self.assertTrue(listed({"id": "rozi@rozi-checkout", "enabled": False}))
-        self.assertFalse(listed({"id": "rust-analyzer-lsp@claude-plugins-official"}))
-        self.assertFalse(listed({"id": "rozi-extras@rozi"}))
-        self.assertFalse(listed())
-        with self.assertRaises(cs.SessionsError):
-            cs.has_hooks_plugin("not json")
-
-    def service(self, installed, settings=None, hosts=True):
-        cli = FakeCli([], [])
-        if isinstance(installed, Exception):
-            def hooks_installed():
-                raise installed
-        else:
-            def hooks_installed():
-                cli.calls.append(("hooks_installed",))
-                return installed
-        cli.hooks_installed = hooks_installed
-        cli.panes = lambda: [pane()] if hosts else []
-        service = cs.SessionsService(settings or cs.Settings(), cli=cli)
-        service.publish = lambda pane_id, rows: None
-        return service, cli
-
-    def test_a_missing_plugin_is_suggested_once_per_run(self) -> None:
-        service, cli = self.service(installed=False)
-        service.poll()
-        service.poll()
-        notices = [call for call in cli.calls if call[0] == "notify"]
-        self.assertEqual(notices, [("notify", cs.HOOKS_NOTICE)])
-        self.assertEqual(cli.calls.count(("hooks_installed",)), 1)
-
-    def test_the_install_command_is_listed_only_while_the_plugin_is_missing(self) -> None:
-        for hosts in (True, False):
-            service, cli = self.service(installed=False, hosts=hosts)
-            service.poll()
-            service.poll()
-            offers = [call for call in cli.calls if call[0] == "offer"]
-            self.assertEqual(offers, [("offer", "install-hooks", True)])
-        for installed in (True, cs.SessionsError("unknown option '--json'")):
-            service, cli = self.service(installed=installed)
-            service.poll()
-            self.assertNotIn("offer", [call[0] for call in cli.calls])
-
-    def test_nothing_is_suggested_when_it_is_installed_unwanted_or_unused(self) -> None:
-        for service, cli in (
-            self.service(installed=True),
-            self.service(installed=False, settings=cs.Settings(suggest_hooks=False)),
-            self.service(installed=False, hosts=False),
-            self.service(installed=cs.SessionsError("unknown option '--json'")),
-        ):
-            service.poll()
-            self.assertNotIn("notify", [call[0] for call in cli.calls])
-
-
-def load_installer():
-    path = SCRIPT.parent / "install_hooks.py"
-    spec = importlib.util.spec_from_file_location("install_hooks_example", path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-ih = load_installer()
-
-
-class InstallerCli:
-    def __init__(self, installed=False, fail=None):
-        self.settings = cs.Settings(claude="claude")
-        self.installed = installed
-        self.fail = fail
-        self.calls: list[tuple] = []
-
-    def hooks_installed(self):
-        return self.installed
-
-    def run(self, args, timeout=0.0):
-        self.calls.append(("run", tuple(args[1:])))
-        if self.fail and self.fail in args:
-            raise ih.cs.SessionsError(f"claude plugin {self.fail} failed: offline")
-        return ""
-
-    def notify(self, message, *, error=False):
-        self.calls.append(("notify", message, error))
-
-    def offer_command(self, command, offered):
-        self.calls.append(("offer", command, offered))
-
-
-class InstallerTests(unittest.TestCase):
-    def test_install_adds_the_marketplace_then_the_plugin(self) -> None:
-        cli = InstallerCli()
-        ih.install(cli)
-        self.assertEqual(
-            cli.calls[:2],
-            [
-                ("run", ("plugin", "marketplace", "add", "tui-lipan/rozi")),
-                ("run", ("plugin", "install", "rozi@rozi")),
-            ],
-        )
-        self.assertIn("Restart Claude Code", cli.calls[-1][1])
-        self.assertFalse(cli.calls[-1][2])
-        # Nothing left to offer: the command leaves the palette.
-        self.assertIn(("offer", "install-hooks", False), cli.calls)
-
-    def test_an_installed_plugin_is_left_alone(self) -> None:
-        cli = InstallerCli(installed=True)
-        ih.install(cli)
-        self.assertEqual([call[0] for call in cli.calls], ["offer", "notify"])
-        self.assertEqual(cli.calls[0], ("offer", "install-hooks", False))
-        self.assertIn("already installed", cli.calls[1][1])
-
-    def test_a_failure_is_reported_once_as_an_error(self) -> None:
-        cli = InstallerCli(fail="install")
-        ih.install(cli)
-        notices = [call for call in cli.calls if call[0] == "notify"]
-        self.assertEqual(len(notices), 1)
-        self.assertIn("offline", notices[0][1])
-        self.assertTrue(notices[0][2])
-        # Still missing, so still offered.
-        self.assertNotIn("offer", [call[0] for call in cli.calls])
-
-
-class SettingsTests(unittest.TestCase):
-    def test_settings_fall_back_to_defaults(self) -> None:
-        settings = cs.Settings.from_environment(
-            {
-                "ROZI_EXTENSION_CONFIG": json.dumps(
-                    {"poll_seconds": 0, "scope": "bogus", "claude": " ", "switching": "yes"}
-                )
-            }
-        )
-        self.assertEqual(settings, cs.Settings(poll_seconds=0.5))
-        self.assertEqual(cs.Settings.from_environment({}), cs.Settings())
-        self.assertFalse(
-            cs.Settings.from_environment(
-                {"ROZI_EXTENSION_CONFIG": '{"switching": false}'}
-            ).switching
-        )
-
-
-class WatchHostTest(unittest.TestCase):
-    def test_end_of_file_on_a_stdin_pipe_stops_the_service(self) -> None:
-        read_end, write_end = os.pipe()
-        messages: queue.Queue[tuple[object, ...]] = queue.Queue()
-        try:
-            self.assertTrue(cs.watch_host(messages, read_end))
-            self.assertTrue(messages.empty())
-            os.close(write_end)
-            self.assertEqual(messages.get(timeout=5), ("stop",))
-        finally:
-            os.close(read_end)
-
-    def test_a_stdin_that_is_not_a_pipe_is_not_watched(self) -> None:
-        # Older rozi releases hand services `/dev/null`, which is at end of file from the start.
-        messages: queue.Queue[tuple[object, ...]] = queue.Queue()
-        with open(os.devnull, "rb") as devnull:
-            self.assertFalse(cs.watch_host(messages, devnull.fileno()))
-        self.assertTrue(messages.empty())
-
-
-class RepositoryTests(unittest.TestCase):
-    def test_a_removed_worktree_resolves_through_its_nearest_existing_directory(self) -> None:
-        with tempfile.TemporaryDirectory() as root:
-            asked = []
-
-            class Probe(cs.Cli):
-                def run(self, args, timeout=cs.COMMAND_TIMEOUT):
-                    asked.append(args[2])
-                    return "/repo/.git"
-
-            gone = os.path.join(root, ".claude", "worktrees", "fix")
-            Probe(cs.Settings()).repository(gone)
-            self.assertEqual(asked, [root])
 
 
 if __name__ == "__main__":

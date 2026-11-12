@@ -29,10 +29,6 @@ Later releases can be applied with `rozi extensions update claude-rozi-sessions`
 
 Start `claude` in a rozi pane and send work to the background from it.
 
-For live status of the conversation on screen, also install
-[rozi's Claude Code plugin](#with-rozis-claude-code-plugin): run **Install Claude Code hooks** from
-the command palette.
-
 ## What is listed
 
 The supervised `claude-rozi-sessions.watch` service polls `claude agents --json` and
@@ -41,8 +37,7 @@ rozi that reports `foreground-changed` and `agent-state-changed`. A pane is a Cl
 foreground process group. The client is in one of two modes:
 
 - **Running its own conversation.** Claude lists that conversation as an interactive session whose
-  process is in the pane's foreground process group. It is the active row. The pane publishes rows only when there is at least one background session besides it; a client alone
-  with its own conversation is left to rozi's ordinary agent detection. Claude gives this
+  process is in the pane's foreground process group. It is the active row. Claude gives this
   conversation a generated name such as `myproject-c3` for as long as it runs, so the row shows the
   title Claude puts on the terminal instead, or "New session" until Claude has titled it.
 - **Attached.** After the client switches to a background session, or opens Claude's session list,
@@ -80,6 +75,8 @@ the background, keeps its row: its ID, its place, and the run history rozi keeps
 
 | Claude Code reports | Row status |
 | --- | --- |
+| The client's own conversation: `busy` | `working` |
+| The client's own conversation: `idle`, after a turn ran in it | `done` |
 | `status` `waiting`: a permission prompt, question, or other dialog is open | `blocked`, with Claude's reason, such as "Permission prompt" |
 | `working`, while Claude reports it busy | `working` |
 | `working`, while Claude reports it idle: its turn ended but the task is not marked finished | `idle`, reason "Waiting" |
@@ -99,38 +96,6 @@ asks you to choose, and for a session waiting for its first prompt. No dialog is
 row shows the turn as `done` and keeps `blocked` for a session that cannot continue until you
 answer it. A session waiting for its first prompt still carries its ID as its name, since Claude
 titles a session after that prompt, so its row is an `idle` "New session" instead.
-
-### With rozi's Claude Code plugin
-
-rozi's Claude Code hook plugin reports the state of the conversation the client runs itself. Each
-row carries its conversation ID as `native_session`, and rozi lets the hook report drive the row
-with the same ID, so that row shows the hooks' live state while every other row stays listed.
-
-Claude runs no hooks in the pane when the client attaches to a background session, so the hooks'
-last report goes stale. rozi keeps it out of the list once no row names its conversation, and
-restores the active row's conversation when the session is resurrected.
-
-A conversation the client sends to the background keeps its row and its `native_session`, which is
-the ID Claude resumes it by, but runs on under a new session ID. The row also carries that ID as
-`live_session`. The background process's hooks report under it, so with a rozi that reads
-`live_session` they drive the row, and the client's last report on the conversation no longer does.
-
-The plugin is optional, and this extension never installs it on its own: it changes Claude Code's
-setup for every session, inside rozi or not. When Claude is in use and the plugin is not installed,
-the extension says so in one notification per run. To install it, run **Install Claude Code
-hooks** from the command palette, or `rozi run-action claude-rozi-sessions.install-hooks`. That
-runs Claude Code's own commands, the same as installing it by hand:
-
-```bash
-claude plugin marketplace add tui-lipan/rozi
-claude plugin install rozi@rozi
-```
-
-The command is in the command palette only while the plugin is missing: the extension checks once
-each time it starts, and the command leaves the palette once it has installed the plugin. It still
-runs from `rozi run-action` either way. Then restart Claude Code in its panes. A plugin named `rozi` from any marketplace counts as
-installed, enabled or not, so a disabled one is not suggested again. Set `suggest_hooks = false`
-to never mention it.
 
 ## Switch sessions
 
@@ -198,7 +163,6 @@ claude = "claude"   # the Claude Code executable
 poll_seconds = 2    # 0.5 to 60
 scope = "all"       # or "cwd"
 switching = true    # false: never type into Claude
-suggest_hooks = true  # false: never suggest rozi's Claude Code plugin
 ```
 
 With `scope = "all"`, every background session on the machine is listed in some Claude pane, like
