@@ -60,6 +60,11 @@ Background sessions are listed too, each with the directory it works in, so rozi
 that directory's project and branch. Interactive sessions in other terminals are listed where they
 run, not here.
 
+`/resume` typed into a client attached to a background session resumes the other conversation in
+that session's place, and Claude keeps listing it under the replaced conversation's name until the
+resumed one has its own. The resumed conversation is then the active row, titled from the terminal
+until then, and the replaced one stays listed as stopped, as after a switch from its row.
+
 With Claude clients in several panes, each background session is listed in one of them only:
 
 1. The pane attached to it.

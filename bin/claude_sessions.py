@@ -361,7 +361,7 @@ class HostMemory:
     def titled(self, session: Session) -> Session:
         """`session` under the title the client's terminal gave it, if Claude lists it by ID."""
         title = self.titles.get(session.session_id)
-        if title is None or not session.untitled:
+        if title is None or session.name is not None:
             return session
         return replace(session, name=title, untitled=False, screen_titled=True)
 
@@ -635,6 +635,25 @@ def follow_moved(memory: HostMemory, host: Host, sessions: list[Session], now_ms
             del memory.moved[session_id]
 
 
+def resumed_in_place(
+    workers: dict[str, Session], sessions: list[Session]
+) -> list[tuple[Session, Session]]:
+    """Background workers that run another conversation than at the last poll, each as the
+    conversation it ran then and the one it runs now.
+
+    `/resume` in a client attached to a background session resumes the other conversation in that
+    session's worker. Claude keeps listing the worker under its id, start, and process, and swaps
+    only the session id. `workers` is the last poll's background sessions by worker id.
+    """
+    return [
+        (before, session)
+        for session in sessions
+        if session.kind == "background"
+        and (before := workers.get(session.short_id)) is not None
+        and before.session_id != session.session_id
+    ]
+
+
 def shown_session(
     host: Host, sessions: list[Session], memory: HostMemory, label: str | None
 ) -> str | None:
@@ -652,7 +671,7 @@ def learn_title(
         return
     title = conversation_title(host.pane.title)
     if title is not None and any(
-        session.session_id == shown and session.untitled for session in sessions
+        session.session_id == shown and session.name is None for session in sessions
     ):
         memory.titles[shown] = title
 
@@ -1306,6 +1325,12 @@ class SessionsService:
         # The pane each background session is listed in, kept between polls; see `assign_owners`.
         self.owners: dict[str, PaneKey] = {}
         self.hosts: dict[PaneKey, Host] = {}
+        # The conversation each pane showed at the last poll.
+        self.shown: dict[PaneKey, str | None] = {}
+        # The last poll's background sessions by worker id, as Claude listed them, and the names a
+        # worker kept from a conversation it no longer runs; see `follow_resumes`.
+        self.workers: dict[str, Session] = {}
+        self.stale_names: dict[str, str] = {}
         # The session name each attached client showed when last read, to notice a switch.
         self.labels: dict[PaneKey, str | None] = {}
         self.next_token = 1
@@ -1386,8 +1411,45 @@ class SessionsService:
             # The pane or its session went away. Try again next poll.
             self.stop_publisher(key)
 
+    def follow_resumes(self, sessions: list[Session]) -> list[Session]:
+        """Follow conversations resumed inside a background worker, and return `sessions` without
+        the names workers kept from the conversations they replaced.
+
+        The resumed conversation stays in the replaced one's pane. Where a pane showed the replaced
+        one, the client now shows the resumed one, and the replaced one stays listed as stopped, as
+        after a switch made from its row. Claude keeps the worker's name when the resumed
+        conversation has none, so that name is not shown for it.
+        """
+
+        def named(session: Session) -> Session:
+            stale = self.stale_names.get(session.session_id)
+            return replace(session, name=None) if stale and stale == session.name else session
+
+        for before, now in resumed_in_place(self.workers, sessions):
+            if before.session_id in self.owners:
+                self.owners[now.session_id] = self.owners.pop(before.session_id)
+            for key, memory in self.memory.items():
+                if memory.seen is not None and before.session_id in memory.seen:
+                    # Not a new worker, so never the client's own conversation moving out.
+                    memory.seen.add(now.session_id)
+                if self.shown.get(key) == before.session_id:
+                    memory.last_target = now.session_id
+                    memory.displaced.setdefault(before.session_id, named(before))
+            if now.name is not None and now.name == before.name:
+                self.stale_names[now.session_id] = now.name
+        self.workers = {
+            session.short_id: session for session in sessions if session.kind == "background"
+        }
+        names = {session.session_id: session.name for session in sessions}
+        self.stale_names = {
+            session_id: name
+            for session_id, name in self.stale_names.items()
+            if names.get(session_id) == name
+        }
+        return [named(session) for session in sessions]
+
     def poll(self) -> None:
-        sessions = self.cli.sessions()
+        sessions = self.follow_resumes(self.cli.sessions())
         hosts = {host.pane.key: host for host in classify(self.cli.panes(), sessions)}
         self.hosts = hosts
         # A pane is gone when no attached session lists it. A session off screen is still listed.
@@ -1429,6 +1491,7 @@ class SessionsService:
         for key, host in hosts.items():
             if host.pane.on_screen:
                 learn_title(self.memory[key], host, sessions, shown[key])
+        self.shown = shown
         self.owners = assign_owners(
             list(hosts.values()), sessions, shown, self.memory, self.owners, self.settings.scope
         )

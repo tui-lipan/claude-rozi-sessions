@@ -510,6 +510,39 @@ class OwnershipTests(unittest.TestCase):
         # Typing would reach pane 1 of the session on screen, another session's pane.
         self.assertEqual(cli.calls, [])
 
+    def test_a_conversation_resumed_inside_a_worker_stays_with_its_client(self) -> None:
+        own = session("own", kind="interactive", pid=501)
+        before = session("old-conversation", pid=900, name="Old topic", started=5)
+
+        class PollCli(FakeCli):
+            title = "✳ Old topic"
+
+            def panes(self):
+                return [host_pane(1), replace(host_pane(2), title=self.title)]
+
+        cli = PollCli(sessions(own, before), [], after=showing("Old topic"))
+        service = cs.SessionsService(cs.Settings(), cli=cli)
+        service.hooks_checked, service.hooks_present = True, True
+        published = {}
+        service.publish = lambda pane_key, rows: published.__setitem__(
+            pane_key, [(row["id"], row["title"], row["status"], row["active"]) for row in rows])
+        service.poll()
+        self.assertEqual(published[key(2)], [("old-conversation", "Old topic", "done", True)])
+
+        # `/resume` typed into pane 2: the same worker, with only its session id changed, and
+        # still the old conversation's name; the terminal title follows the resumed one. Pane 1 is
+        # the lowest pane in the same directory.
+        after = {**before, "sessionId": "resumed", "state": "working", "status": "busy"}
+        cli.listed = sessions(own, after)
+        cli.title = "✳ Resumed topic"
+        cli.after = [f"● reply\n{RULE}\n❯\n{RULE}\n  esc to interrupt"]
+        service.poll()
+        self.assertEqual(published[key(1)], [])
+        self.assertEqual(
+            published[key(2)],
+            [("old-conversation", "Old topic", "done", False), ("resumed", "Resumed topic", "working", True)],
+        )
+
 
 class ScreenTests(unittest.TestCase):
     def test_a_placeholder_is_not_a_draft(self) -> None:
