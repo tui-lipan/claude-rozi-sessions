@@ -102,6 +102,8 @@ class Settings:
     poll_seconds: float = 2.0
     scope: str = "all"
     switching: bool = True
+    # Minutes a quiet row you have seen stays listed off screen; 0 keeps every row.
+    forget_minutes: float = 30.0
 
     @classmethod
     def from_environment(cls, environ: dict[str, str]) -> Settings:
@@ -118,12 +120,21 @@ class Settings:
             poll = float(values.get("poll_seconds", cls.poll_seconds))
         except (TypeError, ValueError):
             poll = cls.poll_seconds
+        try:
+            forget = float(values.get("forget_minutes", cls.forget_minutes))
+        except (TypeError, ValueError):
+            forget = cls.forget_minutes
         return cls(
             claude=claude if isinstance(claude, str) and claude.strip() else cls.claude,
             poll_seconds=min(max(poll, 0.5), 60.0),
             scope=scope if scope in {"all", "cwd"} else cls.scope,
             switching=switching if isinstance(switching, bool) else cls.switching,
+            forget_minutes=forget if forget >= 0 else cls.forget_minutes,
         )
+
+    @property
+    def forget_ms(self) -> int:
+        return int(self.forget_minutes * 60_000)
 
 
 @dataclass(frozen=True)
@@ -150,6 +161,12 @@ class Session:
     # client's conversation sent to the background before its first prompt keeps its ID as its name
     # in Claude's list after that prompt.
     screen_titled: bool = False
+    # The name of the worker this conversation runs in, which Claude draws above the prompt, when
+    # the worker kept it from a conversation it ran before (`/resume` or `/clear` inside it).
+    worker_name: str | None = None
+    # Stopped, and its worker runs another conversation now: the worker's name and ID above the
+    # prompt name that one.
+    replaced: bool = False
 
     @classmethod
     def from_wire(cls, value: object) -> Session | None:
@@ -267,7 +284,9 @@ class Pane:
             agent=text(value.get("agent")),
             foreground_pid=integer(value.get("foreground_pid")),
             session=text(value.get("session")),
-            title=text(value.get("title")),
+            # What the client itself titled the pane: `title` is a name the user gave the pane
+            # instead, when there is one. A rozi without `program_title` sends only `title`.
+            title=text(value.get("program_title")) or text(value.get("title")),
             instance=session_instance(value),
             on_screen=value.get("on_screen") is not False,
         )
@@ -292,6 +311,13 @@ class Host:
 
     pane: Pane
     interactive: Session | None
+
+
+@dataclass(frozen=True)
+class Quiet:
+    status: str
+    since: int
+    seen: bool
 
 
 @dataclass
@@ -335,6 +361,29 @@ class HostMemory:
     # The client's own conversation, if a turn has run in it since this service first saw it.
     # Claude lists that conversation only as busy, waiting, or idle, never as done.
     turned: str | None = None
+    # Each quiet row's state, since when it has been quiet off screen, and whether you have seen
+    # it since it went quiet.
+    quiet: dict[str, Quiet] = field(default_factory=dict)
+
+    def keeps(
+        self, session: Session, row_id: str, on_screen: bool, now_ms: int, forget_ms: int
+    ) -> bool:
+        """Whether `session`'s row stays listed. A row leaves once it has been quiet and off
+        screen for `forget_ms` after you saw it: idle, or done and shown since it finished. A
+        finished turn you have not seen stays, as does a conversation waiting on its own task,
+        which goes on by itself. A stopped conversation was on screen when it was stopped."""
+        status, reason = session.row_state()
+        if status not in {"idle", "done"} or reason == "Waiting":
+            self.quiet.pop(row_id, None)
+            return True
+        quiet = self.quiet.get(row_id)
+        if on_screen or quiet is None or quiet.status != status:
+            seen = on_screen or status == "idle" or session.stopped
+            if quiet is not None and quiet.status == status:
+                seen = seen or quiet.seen
+            quiet = Quiet(status=status, since=now_ms, seen=seen)
+            self.quiet[row_id] = quiet
+        return not (forget_ms > 0 and quiet.seen and now_ms - quiet.since >= forget_ms)
 
     def look(self, browsing: bool, now_ms: int) -> None:
         """Note whether the client shows Claude's session list now."""
@@ -641,7 +690,7 @@ def shown_session(
 ) -> str | None:
     """The conversation the client has on screen, among every one it could switch to."""
     listed = [memory.titled(session) for session in listed_sessions(host, sessions, "all")]
-    return active_session(host, listed + list(memory.displaced.values()), label, memory)
+    return active_session(host, listed + stopped_sessions(memory, listed), label, memory)
 
 
 def learn_title(
@@ -722,6 +771,9 @@ def host_rows(
     memory: HostMemory,
     label: str | None,
     owners: dict[str, PaneKey] | None = None,
+    *,
+    forget_ms: int = 0,
+    now_ms: int | None = None,
 ) -> list[dict[str, object]]:
     """The rows a host pane publishes: the client's own conversation, when it runs one, and the
     background sessions it lists.
@@ -731,6 +783,10 @@ def host_rows(
 
     Rows are ordered by when each conversation started, wherever it runs now, so switching never
     renumbers them: rozi names a pane's rows by position.
+
+    With `forget_ms`, a quiet row you have seen leaves the list once it has been off screen that
+    long, and comes back when its conversation changes state. Claude's own session list still
+    has it.
     """
     sessions = [memory.titled(session) for session in sessions]
     if host.interactive is not None:
@@ -749,24 +805,47 @@ def host_rows(
         # Running again, under its own id or, once resumed, under the conversation's first one.
         if session_id in running or memory.origin(session).session_id in running:
             del memory.displaced[session_id]
-    displaced = [
-        replace(session, stopped=True, kind="background") for session in memory.displaced.values()
-    ]
-    everything = listed + displaced
+    everything = listed + stopped_sessions(memory, listed)
+
     def place(session: Session) -> tuple[int, str]:
         origin = memory.origin(session)
         return memory.places.setdefault(origin.session_id, origin.started_at), origin.session_id
 
     everything.sort(key=place)
+    active = active_session(host, everything, label, memory)
+    now_ms = int(time.time() * 1000) if now_ms is None else now_ms
+    memory.quiet = {
+        row_id: quiet
+        for row_id, quiet in memory.quiet.items()
+        if any(memory.origin(session).session_id == row_id for session in everything)
+    }
+    kept = []
+    for session in everything:
+        row_id = memory.origin(session).session_id
+        if memory.keeps(session, row_id, session.session_id == active, now_ms, forget_ms):
+            kept.append(session)
+        elif session.stopped:
+            # Only this service remembers it, and it is done remembering.
+            del memory.displaced[session.session_id]
+    everything = kept
     memory.places = {
         row_id: started
         for row_id, started in memory.places.items()
         if any(memory.origin(session).session_id == row_id for session in everything)
     }
-    active = active_session(host, everything, label, memory)
     return [
         session.row(session.session_id == active, memory.origin(session).session_id)
         for session in everything
+    ]
+
+
+def stopped_sessions(memory: HostMemory, listed: list[Session]) -> list[Session]:
+    """The conversations this pane remembers as stopped, each marked when its worker runs another
+    listed conversation now."""
+    workers = {session.short_id for session in listed if session.kind == "background"}
+    return [
+        replace(session, stopped=True, kind="background", replaced=session.short_id in workers)
+        for session in memory.displaced.values()
     ]
 
 
@@ -1271,7 +1350,10 @@ def switch_confirmed(
 
 def session_names(session: Session) -> set[str]:
     """Every way Claude may name `session` above its prompt."""
-    return {name for name in (session.name, session.short_id, session.session_id) if name}
+    if session.replaced:
+        return {session.session_id}
+    names = (session.name, session.worker_name, session.short_id, session.session_id)
+    return {name for name in names if name}
 
 
 def write_line(stream: Any, value: object) -> None:
@@ -1388,7 +1470,9 @@ class SessionsService:
 
         def named(session: Session) -> Session:
             stale = self.stale_names.get(session.session_id)
-            return replace(session, name=None) if stale and stale == session.name else session
+            if stale and stale == session.name:
+                return replace(session, name=None, worker_name=stale)
+            return session
 
         for before, now in resumed_in_place(self.workers, sessions):
             if before.session_id in self.owners:
@@ -1462,7 +1546,13 @@ class SessionsService:
         )
         for key, host in hosts.items():
             rows = host_rows(
-                host, sessions, self.settings.scope, self.memory[key], labels[key], self.owners
+                host,
+                sessions,
+                self.settings.scope,
+                self.memory[key],
+                labels[key],
+                self.owners,
+                forget_ms=self.settings.forget_ms,
             )
             self.publish(key, rows)
 

@@ -285,6 +285,44 @@ class RowTests(unittest.TestCase):
         self.assertEqual([row["id"] for row in rows], ["early", "own", "late"])
         self.assertEqual([row["active"] for row in rows], [False, True, False])
 
+    def test_a_quiet_row_you_have_seen_leaves_the_list_until_it_changes(self) -> None:
+        host = cs.Host(pane=pane(), interactive=None)
+        memory = cs.HostMemory()
+        forget = 60_000
+
+        def rows(listed, label, now_ms):
+            return [
+                (row["id"], row["status"])
+                for row in cs.host_rows(
+                    host, sessions(*listed), "all", memory, label, forget_ms=forget, now_ms=now_ms
+                )
+            ]
+
+        seen = session("seen", name="seen", state="done", started=1)
+        unseen = session("unseen", name="unseen", state="done", started=2)
+        waiting = session("waiting", name="waiting", state="working", status="idle", started=3)
+        listed = [seen, unseen, waiting]
+        rows(listed, "seen", 0)
+        # Each finished while off screen except `seen`, which was on screen when it finished.
+        self.assertEqual(len(rows(listed, None, 1)), 3)
+        # A finished turn you have not looked at, and a wait on Claude's own task, stay listed.
+        self.assertEqual(
+            rows(listed, None, 1 + forget), [("unseen", "done"), ("waiting", "idle")]
+        )
+        # Working again, it is back in its place.
+        listed[0] = {**seen, "state": "working", "status": "busy"}
+        self.assertEqual(rows(listed, None, 2 + forget)[0], ("seen", "working"))
+
+    def test_a_stopped_conversation_is_forgotten_once_quiet(self) -> None:
+        host = cs.Host(pane=pane(), interactive=None)
+        stopped = sessions(session("stopped", name="old"))[0]
+        memory = cs.HostMemory(displaced={"stopped": stopped})
+        listed = sessions(session("now", name="now", started=1))
+        cs.host_rows(host, listed, "all", memory, "now", forget_ms=10, now_ms=0)
+        rows = cs.host_rows(host, listed, "all", memory, "now", forget_ms=10, now_ms=10)
+        self.assertEqual([row["id"] for row in rows], ["now"])
+        self.assertEqual(memory.displaced, {})
+
     def test_an_attached_client_is_on_the_session_named_above_its_prompt(self) -> None:
         listed = sessions(session("aaa", name="fix login"), session("bbb", name="docs"))
         host = cs.Host(pane=pane(), interactive=None)
@@ -556,6 +594,30 @@ class OwnershipTests(unittest.TestCase):
         self.assertEqual(
             published[key(2)],
             [("old-conversation", "Old topic", "done", False), ("resumed", "Resumed topic", "working", True)],
+        )
+
+    def test_a_conversation_cleared_inside_a_worker_is_the_one_on_screen(self) -> None:
+        before = session("old-conversation", pid=900, name="Old topic", started=5)
+
+        class PollCli(FakeCli):
+            def panes(self):
+                return [replace(host_pane(2), title="✳ Old topic")]
+
+        cli = PollCli(sessions(before), [], after=showing("Old topic"))
+        service = cs.SessionsService(cs.Settings(), cli=cli)
+        published = {}
+        service.publish = lambda pane_key, rows: published.__setitem__(
+            pane_key, [(row["id"], row["status"], row["active"]) for row in rows])
+        service.poll()
+
+        # `/clear` in pane 2: a new conversation in the same worker, which keeps its name and
+        # still draws it above the prompt. That name is the worker's now, not the stopped one's.
+        after = {**before, "sessionId": "cleared", "state": "working", "status": "busy"}
+        cli.listed = sessions(after)
+        service.poll()
+        self.assertEqual(
+            published[key(2)],
+            [("cleared", "working", True), ("old-conversation", "done", False)],
         )
 
 

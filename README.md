@@ -55,10 +55,11 @@ Background sessions are listed too, each with the directory it works in, so rozi
 that directory's project and branch. Interactive sessions in other terminals are listed where they
 run, not here.
 
-`/resume` typed into a client attached to a background session resumes the other conversation in
-that session's place, and Claude keeps listing it under the replaced conversation's name until the
-resumed one has its own. The resumed conversation is then the active row, titled from the terminal
-until then, and the replaced one stays listed as stopped, as after a switch from its row.
+`/resume` or `/clear` typed into a client attached to a background session runs another
+conversation in that session's place, and Claude keeps listing and labelling it under the replaced
+conversation's name until the new one has its own. The new conversation is then the active row,
+titled from the terminal until then, and the replaced one stays listed as stopped, as after a
+switch from its row.
 
 With Claude clients in several panes, each background session is listed in one of them only:
 
@@ -72,6 +73,11 @@ Rows are ordered by when each conversation started, the client's own included, a
 place it was first published in. rozi names a pane's rows by position (`Claude Code #2`), so
 switching never renumbers them. A conversation that moves, such as the client's own one going to
 the background, keeps its row: its ID, its place, and the run history rozi keeps for it.
+
+A quiet row you have seen leaves the list once it has been off screen for `forget_minutes`: an idle
+or stopped conversation, or a finished one shown since its turn ended. A finished turn you have not
+looked at stays, as does a conversation waiting on its own task. A row comes back in its place when
+its conversation changes state, and Claude's own session list (←) still has it.
 
 | Claude Code reports | Row status |
 | --- | --- |
@@ -163,6 +169,7 @@ claude = "claude"   # the Claude Code executable
 poll_seconds = 2    # 0.5 to 60
 scope = "all"       # or "cwd"
 switching = true    # false: never type into Claude
+forget_minutes = 30 # 0: keep quiet rows listed
 ```
 
 With `scope = "all"`, every background session on the machine is listed in some Claude pane, like
