@@ -53,7 +53,9 @@ foreground process group. The client is in one of two modes:
 
 Background sessions are listed too, each with the directory it works in, so rozi groups it by
 that directory's project and branch. Interactive sessions in other terminals are listed where they
-run, not here.
+run, not here. A background session waiting for its first prompt is left out until Claude titles
+it, unless it is the client's own conversation sent there by ←; open the others from Claude's
+session list.
 
 `/resume` or `/clear` typed into a client attached to a background session runs another
 conversation in that session's place, and Claude keeps listing and labelling it under the replaced

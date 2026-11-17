@@ -821,6 +821,13 @@ def host_rows(
     }
     kept = []
     for session in everything:
+        if session.untitled and session.kind == "background" and session.session_id not in {
+            active,
+            memory.unnamed,
+        }:
+            # Waiting for its first prompt, which no switch can give it: only Claude's own
+            # session list opens it. Listed once Claude titles it.
+            continue
         row_id = memory.origin(session).session_id
         if memory.keeps(session, row_id, session.session_id == active, now_ms, forget_ms):
             kept.append(session)

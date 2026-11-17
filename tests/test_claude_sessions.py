@@ -298,11 +298,11 @@ class RowTests(unittest.TestCase):
                 )
             ]
 
-        seen = session("seen", name="seen", state="done", started=1)
-        unseen = session("unseen", name="unseen", state="done", started=2)
-        waiting = session("waiting", name="waiting", state="working", status="idle", started=3)
+        seen = session("seen", name="Seen", state="done", started=1)
+        unseen = session("unseen", name="Unseen", state="done", started=2)
+        waiting = session("waiting", name="Waiting", state="working", status="idle", started=3)
         listed = [seen, unseen, waiting]
-        rows(listed, "seen", 0)
+        rows(listed, "Seen", 0)
         # Each finished while off screen except `seen`, which was on screen when it finished.
         self.assertEqual(len(rows(listed, None, 1)), 3)
         # A finished turn you have not looked at, and a wait on Claude's own task, stay listed.
@@ -457,7 +457,7 @@ class OwnershipTests(unittest.TestCase):
         self.assertEqual(rows, {1: ["bg", "one"], 2: ["two"], 3: ["three"]})
 
     def test_the_client_attached_to_a_session_lists_it(self) -> None:
-        listed = sessions(session("bg", name="docs"), session("other", name="other"),
+        listed = sessions(session("bg", name="docs"), session("other", name="notes"),
                           session("one", kind="interactive", pid=501))
         hosts = cs.classify([host_pane(1), host_pane(2)], listed, group_of=lambda pid: pid)
         owners, rows = owned_rows(hosts, listed, shown={1: "one", 2: "bg"})
@@ -1101,7 +1101,7 @@ class QueuedSwitchTests(unittest.TestCase):
 class QueuedResumeInPlaceTests(unittest.TestCase):
     def test_a_queued_switch_back_to_a_moved_conversation_survives_the_polls(self) -> None:
         before = sessions(
-            session("early", started=1, name="early", pid=40),
+            session("early", started=1, name="docs", pid=40),
             session("own", kind="interactive", pid=500, started=2, name="mine"),
         )
         (host,) = cs.classify([pane()], before, group_of=lambda pid: pid)
@@ -1109,21 +1109,21 @@ class QueuedResumeInPlaceTests(unittest.TestCase):
         memory = cs.HostMemory()
         cs.follow_moved(memory, host, before, now_ms=10)
         moved = sessions(
-            session("early", started=1, name="early", pid=40, state="working"),
+            session("early", started=1, name="docs", pid=40, state="working"),
             session("job", started=5, name="mine (2)", pid=41),
         )
         cs.follow_moved(memory, attached, moved, now_ms=20)
         cli = FakeCli(
             moved,
-            [prompt(label="early"), prompt(typed="/resume own", label="early")],
-            after=queued("early", "/resume own"),
+            [prompt(label="docs"), prompt(typed="/resume own", label="docs")],
+            after=queued("docs", "/resume own"),
         )
         self.assertFalse(cs.switch(cli, attached, "own", memory, sleep=lambda _: None))
         self.assertIsNotNone(memory.pending)
         # Polls run while "early" finishes its turn; the stopped job stays listed under its row.
-        stopped = sessions(session("early", started=1, name="early", pid=40, state="working"))
+        stopped = sessions(session("early", started=1, name="docs", pid=40, state="working"))
         cs.follow_moved(memory, attached, stopped, now_ms=30)
-        rows = cs.host_rows(attached, stopped, "all", memory, "early")
+        rows = cs.host_rows(attached, stopped, "all", memory, "docs")
         self.assertEqual([(row["id"], row["reason"] if "reason" in row else None) for row in rows], [("early", None), ("own", "Stopped")])
         # The turn ends and Claude resumes the conversation in the worker that showed "early".
         cli.after = [showing("mine")]
@@ -1145,13 +1145,13 @@ class MovedConversationTests(unittest.TestCase):
     def setUp(self) -> None:
         self.memory = cs.HostMemory()
         self.before = sessions(
-            session("early", started=1, name="early"),
+            session("early", started=1, name="docs"),
             session("own", kind="interactive", pid=500, started=2),
         )
         (self.host,) = cs.classify([pane()], self.before, group_of=lambda pid: pid)
         cs.follow_moved(self.memory, self.host, self.before, now_ms=10)
         self.after = sessions(
-            session("early", started=1, name="early"),
+            session("early", started=1, name="docs"),
             session("forked", started=5, state="blocked"),
         )
         self.attached = cs.Host(pane=pane(), interactive=None)
@@ -1161,7 +1161,7 @@ class MovedConversationTests(unittest.TestCase):
         return cs.host_rows(self.attached, listed, "all", self.memory, label)
 
     def test_the_moved_conversation_keeps_its_row_id_and_place(self) -> None:
-        rows = self.rows(self.after, label="early")
+        rows = self.rows(self.after, label="docs")
         self.assertEqual([row["id"] for row in rows], ["early", "own"])
         # Claude keeps the transcript, and resumes it, under the first id.
         self.assertEqual([row["native_session"] for row in rows], ["early", "own"])
@@ -1170,12 +1170,12 @@ class MovedConversationTests(unittest.TestCase):
         self.assertEqual([row["active"] for row in rows], [True, False])
 
     def test_selecting_the_moved_row_resumes_the_conversation_under_its_new_id(self) -> None:
-        self.rows(self.after, label="early")
+        self.rows(self.after, label="docs")
         self.assertEqual(self.memory.session_for_row("own"), "forked")
         cli = FakeCli(
             self.after,
-            [prompt(label="early"), prompt(typed="/resume own", label="early")],
-            after=[showing("early"), showing("forked")],
+            [prompt(label="docs"), prompt(typed="/resume own", label="docs")],
+            after=[showing("docs"), showing("forked")],
         )
         self.assertTrue(
             cs.switch(cli, self.attached, "own", self.memory, sleep=lambda _: None)
@@ -1195,22 +1195,22 @@ class MovedConversationTests(unittest.TestCase):
         # Claude lists the moved job under a name of its own. Resumed in place, the worker that
         # showed "early" lists the conversation by its first id and name again.
         before = sessions(
-            session("early", started=1, name="early", pid=40),
+            session("early", started=1, name="docs", pid=40),
             session("own", kind="interactive", pid=500, started=2, name="mine"),
         )
         (host,) = cs.classify([pane()], before, group_of=lambda pid: pid)
         memory = cs.HostMemory()
         cs.follow_moved(memory, host, before, now_ms=10)
         moved = sessions(
-            session("early", started=1, name="early", pid=40),
+            session("early", started=1, name="docs", pid=40),
             session("job", started=5, name="mine (2)", pid=41),
         )
         cs.follow_moved(memory, self.attached, moved, now_ms=20)
-        cs.host_rows(self.attached, moved, "all", memory, "early")
+        cs.host_rows(self.attached, moved, "all", memory, "docs")
         resumed = sessions(session("own", started=0, name="mine", pid=40))
         cli = FakeCli(
             moved,
-            [prompt(label="early"), prompt(typed="/resume own", label="early")],
+            [prompt(label="docs"), prompt(typed="/resume own", label="docs")],
             after=showing("mine"),
             listed_after=resumed,
         )
@@ -1274,16 +1274,11 @@ class UnnamedConversationTests(unittest.TestCase):
     def test_the_client_shows_the_conversation_it_sent_to_the_background(self) -> None:
         listed = sessions(self.stale, self.fresh)
         self.memory.look(True, now_ms=900)
-        # Browsing Claude's session list, nothing is on screen.
-        self.assertEqual(
-            self.rows(listed),
-            [("stale-id", "New session", False), ("fresh-id", "New session", False)],
-        )
+        # Browsing Claude's session list, nothing is on screen. Of the untitled sessions, only the
+        # client's own conversation is listed: no switch could open another.
+        self.assertEqual(self.rows(listed), [("fresh-id", "New session", False)])
         self.memory.look(False, now_ms=1_500)
-        self.assertEqual(
-            self.rows(listed, now_ms=2_000),
-            [("stale-id", "New session", False), ("fresh-id", "New session", True)],
-        )
+        self.assertEqual(self.rows(listed, now_ms=2_000), [("fresh-id", "New session", True)])
         # Selecting its row is then a switch to what is already on screen: nothing is typed.
         cli = FakeCli(listed, [prompt()])
         self.assertTrue(cs.switch(cli, self.host, "fresh-id", self.memory, sleep=lambda _: None))
@@ -1303,10 +1298,7 @@ class UnnamedConversationTests(unittest.TestCase):
         self.memory.look(False, now_ms=1_500)
         # Without a prompt the first id has no transcript: the first prompt starts one under the
         # new id, the only one Claude resumes the conversation by. The row takes it.
-        self.assertEqual(
-            self.rows(moved, now_ms=2_000),
-            [("stale-id", "New session", False), ("fresh-id", "New session", True)],
-        )
+        self.assertEqual(self.rows(moved, now_ms=2_000), [("fresh-id", "New session", True)])
         self.assertEqual(self.memory.moved, {})
         cli = FakeCli(moved, [prompt()])
         self.assertTrue(cs.switch(cli, self.host, "fresh-id", self.memory, sleep=lambda _: None))
@@ -1315,8 +1307,9 @@ class UnnamedConversationTests(unittest.TestCase):
     def test_a_session_appearing_long_after_the_session_list_is_not_claimed(self) -> None:
         self.memory.look(True, now_ms=0)
         self.memory.look(False, now_ms=1)
-        rows = self.rows(sessions(self.stale, self.fresh), now_ms=cs.MOVE_WINDOW_MS + 1)
-        self.assertEqual([active for _, _, active in rows], [False, False])
+        # Neither is the client's, so neither is listed until Claude titles it.
+        listed = sessions(self.stale, self.fresh)
+        self.assertEqual(self.rows(listed, now_ms=cs.MOVE_WINDOW_MS + 1), [])
 
     def test_sessions_listed_at_the_first_poll_are_not_claimed(self) -> None:
         memory = cs.HostMemory()
