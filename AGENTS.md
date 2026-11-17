@@ -7,7 +7,7 @@ works in. The repository is a rozi extension: a manifest and one supervised Pyth
 
 ## Commands
 
-- Unit tests: `python -m unittest discover tests -p 'test_*.py'`
+- Unit tests: `python3 -m unittest discover tests -p 'test_*.py'`
 - Manifest validation: `rozi extensions check .`
 - Whitespace check: `git diff --check`
 

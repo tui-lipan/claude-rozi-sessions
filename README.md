@@ -12,7 +12,7 @@ client to that conversation.
 
 - rozi 0.0.40 or newer, on the client and on every host you attach sessions on
 - Claude Code 2.1.285 or newer, for `claude agents --json` and `/resume` of a background session
-- Python 3 available as `python`, and `claude`, on each host that runs Claude Code
+- Python 3 available as `python3`, and `claude`, on each host that runs Claude Code
 - Linux or macOS. See [Limits](#limits).
 
 ## Install
@@ -209,7 +209,7 @@ clients in several panes for different projects.
 ## Development
 
 ```bash
-python -m unittest discover tests -p 'test_*.py'
+python3 -m unittest discover tests -p 'test_*.py'
 rozi extensions check .
 rozi extensions install --link .
 ```

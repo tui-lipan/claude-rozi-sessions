@@ -2,7 +2,7 @@
 id = "claude-rozi-sessions"
 title = "Claude Code sessions"
 description = "One Activity row per Claude Code conversation, grouped by worktree; selecting a row switches Claude to it"
-version = "0.8.1"
+version = "0.8.2"
 api = 1
 min_rozi = "0.0.40"
 homepage = "https://github.com/tui-lipan/claude-rozi-sessions"
@@ -25,7 +25,7 @@ forget_minutes = 30
 
 [[services]]
 name = "watch"
-exec = ["python", "{extension_dir}/bin/claude_sessions.py"]
+exec = ["python3", "{extension_dir}/bin/claude_sessions.py"]
 # Beside each session's Claude Code, whose background sessions and processes a client on another
 # machine cannot see.
 placement = "each-host"
